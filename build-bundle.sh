@@ -11,7 +11,12 @@ BIN_TAR=${1:?需要 atomdns-linux-arm64.tar.gz}
 CONF_ZIP=${2:?需要 config_rust.zip}
 OUT_DIR=${3:-dist}
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-VERSION=0.6.6
+# 包/发布版本号；CI 传 VERSION=<x.y.z>，本地默认 1.0.0
+VERSION=${VERSION:-1.0.0}
+case "$VERSION" in
+	[0-9]*.[0-9]*.[0-9]*) ;;
+	*) echo "VERSION 必须是 x.y.z（当前 '$VERSION'）" >&2; exit 1 ;;
+esac
 NAME="atomdns-openwrt-${VERSION}-aarch64"
 
 TMP=$(mktemp -d)
@@ -49,6 +54,16 @@ awk '
 ' "$TMP/$NAME/config/sub_config/flags.yaml" > "$TMP/$NAME/config/sub_config/flags.yaml.tmp"
 mv "$TMP/$NAME/config/sub_config/flags.yaml.tmp" "$TMP/$NAME/config/sub_config/flags.yaml"
 grep -n 'default: realip' "$TMP/$NAME/config/sub_config/flags.yaml" | head -1
+
+# 发布版本号写进 WebUI 清单，避免发布 v1.0.0 时界面仍显示上游 0.6.6。
+MANIFEST="$TMP/$NAME/config/ui/main/ui-manifest.json"
+if [ -f "$MANIFEST" ]; then
+	sed -i 's/"ui_version"[[:space:]]*:[[:space:]]*"[^"]*"/"ui_version": "v'"$VERSION"'"/' "$MANIFEST"
+	grep -q "\"ui_version\": \"v$VERSION\"" "$MANIFEST" || {
+		echo "错误: ui-manifest.json 版本改写失败" >&2
+		exit 1
+	}
+fi
 
 cp -a "$HERE/files/." "$TMP/$NAME/files/"
 chmod 0755 "$TMP/$NAME/files/atomdns.init" \

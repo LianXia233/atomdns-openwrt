@@ -1,0 +1,191 @@
+name: Build OpenWrt APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (vX.Y.Z)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_TAG: v0.6.6
+  UPSTREAM_SHA256: 6240d7ad1e7668eac99264862ed499e009c99e50a3951088564ea4fc5b3b0dbc
+  CONFIG_ZIP_SHA256: 88a6332d83ebbe81d01ffcbd622b4afc3901689913a4dca327665ab1e0b0f84b
+  RUST_TOOLCHAIN: '1.96.0'
+  RUST_TARGET: aarch64-unknown-linux-musl
+  ZIGLANG_VERSION: '0.17.1'
+  CARGO_ZIGBUILD_VERSION: '0.24.1'
+  SDK_DIR: https://downloads.openwrt.org/snapshots/targets/mediatek/filogic
+  SDK_FILE: openwrt-sdk-mediatek-filogic_gcc-15.3.0_musl.Linux-x86_64.tar.zst
+  PACKAGE_ARCH: aarch64_cortex-a53
+
+jobs:
+  build:
+    name: Build aarch64_cortex-a53 apk
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME}"
+          fi
+          case "$V" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like vX.Y.Z (got '$V')" >&2; exit 1 ;;
+          esac
+          echo "tag=$V" >> "$GITHUB_OUTPUT"
+          echo "number=${V#v}" >> "$GITHUB_OUTPUT"
+
+      # --- Rust: official toolchain (rustup), never OpenWrt's rust package ---
+      - name: Install Rust toolchain (rustup)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+          . "$HOME/.cargo/env"
+          rustup target add "${RUST_TARGET}" --toolchain "${RUST_TOOLCHAIN}"
+          rustc --version
+          cargo --version
+
+      - name: Install zig and cargo-zigbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user \
+            "ziglang==${ZIGLANG_VERSION}" "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/zig" version
+
+      - name: Build AtomDNS binary for aarch64 musl
+        shell: bash
+        env:
+          ATOMDNS_BUILD_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          . "$HOME/.cargo/env"
+          curl -fsSL -o /tmp/atomdns-src.tar.gz \
+            "https://github.com/jasonxtt/atomdns/archive/refs/tags/${UPSTREAM_TAG}.tar.gz"
+          echo "${UPSTREAM_SHA256}  /tmp/atomdns-src.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/atomdns-src.tar.gz -C /tmp
+          SRC="/tmp/atomdns-${UPSTREAM_TAG#v}"
+          cd "$SRC"
+          cargo zigbuild --locked --manifest-path rust/Cargo.toml \
+            -p atomdns-native-host --release --target "${RUST_TARGET}"
+          BIN="rust/target/${RUST_TARGET}/release/atomdns"
+          file "$BIN"
+          if file "$BIN" | grep -q 'dynamically linked'; then
+            echo "::error::the built binary is not statically linked"
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$BIN" "$GITHUB_WORKSPACE/out/atomdns"
+          tar -C "$GITHUB_WORKSPACE/out" --owner=0 --group=0 --numeric-owner \
+            -czf "$GITHUB_WORKSPACE/out/atomdns-linux-arm64.tar.gz" atomdns
+
+      - name: Assemble package source bundle
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.number }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/config_rust.zip \
+            "https://github.com/jasonxtt/atomdns/releases/download/${UPSTREAM_TAG}/config_rust.zip"
+          echo "${CONFIG_ZIP_SHA256}  /tmp/config_rust.zip" | sha256sum -c -
+          ./build-bundle.sh out/atomdns-linux-arm64.tar.gz /tmp/config_rust.zip dist
+          HASH=$(sha256sum dist/atomdns-openwrt-*-aarch64.tar.gz | cut -d' ' -f1)
+          sed -i "s|^PKG_VERSION:=.*|PKG_VERSION:=${{ steps.version.outputs.number }}|" Makefile
+          sed -i "s|^PKG_HASH:=.*|PKG_HASH:=${HASH}|" Makefile
+
+      # --- OpenWrt SDK: packaging only (no Rust inside OpenWrt) ---
+      - name: Download the OpenWrt apk SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${SDK_DIR}/${SDK_FILE}"
+          if ! curl -fsSL -o /tmp/sdk.tar.zst "$URL"; then
+            echo "pinned SDK not found, resolving the current snapshot SDK"
+            FILE=$(curl -fsSL "${SDK_DIR}/" \
+              | grep -oE 'openwrt-sdk-mediatek-filogic[^"<]+\.tar\.zst' | head -n1)
+            [ -n "$FILE" ] || { echo "::error::no SDK in ${SDK_DIR}"; exit 1; }
+            URL="${SDK_DIR}/${FILE}"
+            curl -fsSL -o /tmp/sdk.tar.zst "$URL"
+          fi
+          echo "SDK: $URL"
+          mkdir -p /tmp/sdk
+          tar --zstd -xf /tmp/sdk.tar.zst -C /tmp/sdk --strip-components=1
+          test -x /tmp/sdk/scripts/feeds
+
+      - name: Build apk with the OpenWrt SDK
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.number }}
+        run: |
+          set -euo pipefail
+          cd /tmp/sdk
+          cp "$GITHUB_WORKSPACE"/dist/atomdns-openwrt-*-aarch64.tar.gz dl/
+          mkdir -p package/atomdns
+          cp "$GITHUB_WORKSPACE/Makefile" package/atomdns/Makefile
+          make defconfig >/dev/null
+          make package/atomdns/compile V=s -j"$(nproc)"
+          APK=$(find bin/packages -name 'atomdns-*.apk' | head -n1)
+          [ -n "$APK" ] || { echo "::error::no apk produced"; exit 1; }
+          cp "$APK" "$GITHUB_WORKSPACE/dist/"
+          echo "APK=$APK"
+          staging_dir/host/bin/apk adbdump "$APK" > /tmp/adbdump.txt
+          grep -E '^\s+(name|version|arch):' /tmp/adbdump.txt | head -5
+          grep -q "arch: ${PACKAGE_ARCH}" /tmp/adbdump.txt
+          grep -q "version: ${VERSION}-r1" /tmp/adbdump.txt
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum atomdns-*.apk > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: atomdns-apk-${{ steps.version.outputs.tag }}
+          path: |
+            dist/atomdns-*.apk
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          NOTES="docs/release-${TAG}.md"
+          [ -f "$NOTES" ] || NOTES="docs/release-notes.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/atomdns-*.apk dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/atomdns-*.apk dist/SHA256SUMS \
+              --title "AtomDNS for OpenWrt ${TAG}" \
+              --notes-file "$NOTES" \
+              --verify-tag
+          fi
+          gh release view "$TAG" --json url,assets \
+            --jq '{url: .url, assets: [.assets[].name]}'

@@ -1,27 +1,29 @@
 # AtomDNS for OpenWrt (apk / apk-tools 3, OpenWrt main & ImmortalWrt SNAPSHOT)
 #
-# 上游发布的就是静态 musl 二进制（arm64 / armv7 / amd64），所以这里不编译 Rust，
-# 只把「二进制 + 默认配置包 + procd 启动脚本」打成一个 apk。
+# 本包不编译 Rust：CI 用官方 rustup 工具链（aarch64-unknown-linux-musl +
+# cargo-zigbuild）编出静态二进制，OpenWrt SDK 只负责把「二进制 + 默认配置 +
+# procd 脚本 + LuCI 页面」打成一个 apk。
 #
 # 用法（详见 README.md）：
-#   cp atomdns-openwrt-0.6.6-aarch64.tar.gz  <sdk>/dl/
-#   cp -r openwrt-atomdns <sdk>/package/atomdns
+#   VERSION=1.0.0 ./build-bundle.sh atomdns-linux-arm64.tar.gz config_rust.zip dist
+#   cp dist/atomdns-openwrt-1.0.0-aarch64.tar.gz <sdk>/dl/
+#   cp Makefile <sdk>/package/atomdns/Makefile
 #   cd <sdk> && make package/atomdns/compile V=s
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=atomdns
-PKG_VERSION:=0.6.6
-PKG_RELEASE:=14
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_MAINTAINER:=jasonxtt <https://github.com/jasonxtt/atomdns>
 
-# 预编译包：由 build-bundle.sh 生成，放进 SDK 的 dl/ 后不会联网下载。
-# 注意 PKG_SOURCE 的架构后缀必须与实际二进制一致（当前为 aarch64）。
+# 预编译包：由 build-bundle.sh 生成。CI 会在打包前把真实 sha256 写进 PKG_HASH；
+# 本地构建也要先跑 build-bundle.sh 并同步这个值。
 PKG_SOURCE:=atomdns-openwrt-$(PKG_VERSION)-aarch64.tar.gz
-PKG_SOURCE_URL:=https://github.com/jasonxtt/atomdns/releases/download/v$(PKG_VERSION)
-PKG_HASH:=a41ac9063a713c5f7a3a635859c584205cc14eb556313b55b50dca206e76d8f5
+PKG_SOURCE_URL:=https://github.com/LianXia233/atomdns-openwrt/releases/download/v$(PKG_VERSION)
+PKG_HASH:=0000000000000000000000000000000000000000000000000000000000000000
 PKG_BUILD_DIR:=$(BUILD_DIR)/atomdns-openwrt-$(PKG_VERSION)-aarch64
 
 include $(INCLUDE_DIR)/package.mk
