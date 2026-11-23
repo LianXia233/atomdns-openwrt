@@ -1,0 +1,127 @@
+#!/bin/sh
+# Read/write the few AtomDNS settings exposed by the LuCI advanced panel.
+# Only touches the YAML files shipped with the package; the AtomDNS WebUI's
+# webinfo/settings.json (when present) still has the final say, and `get`
+# reports that as "override".
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+ROOT=/etc/atomdns
+CONF=$ROOT/config_custom.yaml
+SETTINGS=$ROOT/sub_config/settings.yaml
+FLAGS=$ROOT/sub_config/flags.yaml
+UI_STATE=$ROOT/webinfo/settings.json
+
+port() {
+	# listen 的值形如 ":5335" 或 "0.0.0.0:5335"，取最后一个冒号后的端口。
+	awk -F'"' '/^[ \t]*listen:/ { v = $2; sub(/^.*:/, "", v); print v; exit }' "$CONF" 2>/dev/null
+}
+
+mode() {
+	awk '/- tag:[[:space:]]*dns_mode/{f=1} f && /^[[:space:]]*default:/{print $2; exit}' "$FLAGS" 2>/dev/null
+}
+
+socks() {
+	awk '/- tag:[[:space:]]*main_proxy/{f=1} f && /^[[:space:]]*addr:/{v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); gsub(/"/,"",v); print v; exit}' "$SETTINGS" 2>/dev/null
+}
+
+override() {
+	if [ -s "$UI_STATE" ] && grep -qE '"(dns_mode|main_proxy)"' "$UI_STATE" 2>/dev/null; then
+		echo true
+	else
+		echo false
+	fi
+}
+
+schema() {
+	# AtomDNS 本地 health 接口：程序要求的 schema 与已应用的 schema。
+	# 全新安装没有更新器状态文件时，applied 为 0，而 required 仍可显示。
+	out=$(wget -q -T 3 -O - http://127.0.0.1:9099/api/v1/system/health 2>/dev/null)
+	req=$(echo "$out" | grep -o '"required_config_schema":[0-9]*' | cut -d: -f2 | head -n1)
+	app=$(echo "$out" | grep -o '"applied_config_schema":[0-9]*' | cut -d: -f2 | head -n1)
+	printf '{"required":"%s","applied":"%s"}\n' "$req" "$app"
+}
+
+logs() {
+	n=${1:-60}
+	case "$n" in ''|*[!0-9]*) n=60 ;; esac
+	echo "=== logread（过滤 atomdns） ==="
+	logread 2>/dev/null | grep -i atomdns | tail -n "$n"
+	echo
+	echo "=== /tmp/mosdns.log（AtomDNS 自身日志） ==="
+	tail -n "$n" /tmp/mosdns.log 2>/dev/null
+}
+
+replace_block() {
+	# $1 file, $2 tag, $3 option key (default/addr), $4 new value (awk source text)
+	file=$1; tag=$2; key=$3; val=$4
+	tmp="$file.atomdns-tmp"
+	awk -v tag="$tag" -v key="$key" -v val="$val" '
+		$0 ~ "- tag:[ \t]*" tag "([ \t]|$)" { inb = 1 }
+		inb && $0 ~ "^[ \t]*" key ":" {
+			indent = $0
+			sub(/[^ \t].*$/, "", indent)
+			$0 = indent key ": " val
+			inb = 0
+		}
+		{ print }
+	' "$file" > "$tmp" || return 1
+	cat "$tmp" > "$file"
+	rm -f "$tmp"
+}
+
+validate() {
+	# 写入后整体校验；失败由调用方回滚。
+	/usr/bin/atomdns check -d "$ROOT" -c config_custom.yaml >/dev/null 2>&1
+}
+
+commit_file() {
+	# $1 file, $2 backup, $3 command...；失败时恢复备份。
+	file=$1; backup=$2
+	shift 2
+	cp "$file" "$backup" || return 1
+	if ! "$@" || ! validate; then
+		cp "$backup" "$file"
+		rm -f "$backup"
+		echo "配置未通过校验，已回滚" >&2
+		return 1
+	fi
+	rm -f "$backup"
+}
+
+case "${1:-}" in
+	get)
+		printf '{"port":"%s","mode":"%s","socks":"%s","override":%s}\n' \
+			"$(port)" "$(mode)" "$(socks)" "$(override)"
+		;;
+	schema)
+		schema
+		;;
+	logs)
+		logs "${2:-60}"
+		;;
+	set-port)
+		case "${2:-}" in ''|*[!0-9]*) echo "bad port" >&2; exit 2 ;; esac
+		[ "$2" -ge 1 ] && [ "$2" -le 65535 ] || { echo "bad port" >&2; exit 2; }
+		set_port() {
+			# 保留原来的绑定地址（":5335" / "0.0.0.0:5335" / "[::]:5335"），只换端口。
+			sed -i -E "s/^([ \t]*listen:[ \t]*\")([^\"]*:)?[0-9]+\"/\1\2$1\"/" "$CONF"
+		}
+		commit_file "$CONF" "$CONF.atomdns-bak" set_port "$2" || exit 1
+		;;
+	set-mode)
+		case "${2:-}" in realip|fakeip) ;; *) echo "bad mode" >&2; exit 2 ;; esac
+		set_mode() { replace_block "$FLAGS" dns_mode default "$1"; }
+		commit_file "$FLAGS" "$FLAGS.atomdns-bak" set_mode "$2" || exit 1
+		;;
+	set-socks)
+		case "${2:-}" in *[!A-Za-z0-9.:_\[\]-]*) echo "bad socks address" >&2; exit 2 ;; esac
+		set_socks() { replace_block "$SETTINGS" main_proxy addr "\"$1\""; }
+		commit_file "$SETTINGS" "$SETTINGS.atomdns-bak" set_socks "$2" || exit 1
+		;;
+	*)
+		echo "usage: $0 get|schema|logs [N]|set-port N|set-mode realip|fakeip|set-socks HOST:PORT" >&2
+		exit 2
+		;;
+esac

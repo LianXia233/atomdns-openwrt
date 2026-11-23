@@ -1,0 +1,54 @@
+#!/bin/sh /etc/rc.common
+# AtomDNS procd service for OpenWrt.
+#
+# 配置根目录固定为 /etc/atomdns（overlay 可写，apk 升级时由
+# protected_paths.d/atomdns.list 保护用户修改），WebUI 也从这里
+# 的 ui/main 提供，所以不需要额外的静态资源目录。
+#
+# 启动成功后接管 DNS（LAN :53 -> dnsmasq -> AtomDNS）；停止时自动还原
+# dnsmasq 配置并删除接管规则，避免停用后 DNS 断掉。
+
+START=99
+STOP=10
+USE_PROCD=1
+
+ATOMDNS_DIR=/etc/atomdns
+ATOMDNS_CONF=config_custom.yaml
+
+start_service() {
+	if [ ! -f "$ATOMDNS_DIR/$ATOMDNS_CONF" ]; then
+		echo "atomdns: missing $ATOMDNS_DIR/$ATOMDNS_CONF" >&2
+		return 1
+	fi
+
+	procd_open_instance "main"
+	procd_set_param command /usr/bin/atomdns start -d "$ATOMDNS_DIR" -c "$ATOMDNS_CONF"
+	# DNS 服务器会同时持有大量 UDP/TCP 会话，默认 1024 个 fd 偏小。
+	procd_set_param limits nofile="4096 4096"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+
+	# 接管放在独立的 procd 一次性实例里：start_service 返回前主进程还没被
+	# procd 拉起来，同步调用会误判“未运行”。dnsctl apply 自己会等进程和端口，
+	# 失败时保持原 DNS 不动。
+	procd_open_instance "takeover"
+	procd_set_param command /usr/bin/atomdns-dnsctl apply
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	/usr/bin/atomdns-dnsctl restore >/dev/null 2>&1
+}
+
+service_triggers() {
+	procd_add_reload_trigger atomdns
+}
+
+reload_service() {
+	stop
+	start
+}

@@ -1,0 +1,28 @@
+{
+	"luci-app-atomdns": {
+		"description": "Grant access to AtomDNS status, a jump to its WebUI, and service control",
+		"read": {
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"file": {
+				"/etc/atomdns/config_custom.yaml": [ "read" ],
+				"/etc/atomdns/ui/main/ui-manifest.json": [ "read" ],
+				"/etc/atomdns/webinfo/rust_config_update_state.json": [ "read" ],
+				"/etc/rc.d/S99atomdns": [ "read" ],
+				"/etc/init.d/atomdns": [ "read" ],
+				"/proc/uptime": [ "read" ],
+				"/proc/*/status": [ "read" ],
+				"/proc/*/stat": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/bin/atomdns": [ "exec" ],
+				"/usr/bin/atomdns-dnsctl": [ "exec" ],
+				"/usr/bin/atomdns-configctl": [ "exec" ],
+				"/etc/init.d/atomdns": [ "exec" ]
+			}
+		}
+	}
+}

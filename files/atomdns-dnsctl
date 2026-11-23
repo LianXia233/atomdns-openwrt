@@ -1,0 +1,145 @@
+#!/bin/sh
+# AtomDNS DNS takeover / restore.
+#
+# Aim: LAN clients resolve through AtomDNS, while local DHCP names still come
+# from dnsmasq. HomeProxy (sing-box auto_redirect) hijacks LAN port 53 at
+# `prerouting priority dstnat - 1` / `dstnat + 2`, so this script installs a
+# nat chain at `dstnat - 10` that pulls LAN port 53 back to the local dnsmasq
+# first, then points dnsmasq's only upstream at AtomDNS.
+#
+# Every change is reversible: the original dnsmasq settings are snapshotted in
+# /etc/atomdns/dns-takeover.state and restored by `restore`.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# 串行化：升级/重启时可能同时有 apply 与 restore，两个进程同时改 nft 和
+# dnsmasq 会出现「刚建的表被另一个删掉」的竞态。
+if command -v flock >/dev/null 2>&1; then
+	exec 9>/tmp/atomdns-dnsctl.lock
+	flock 9
+fi
+
+CONF=/etc/atomdns/config_custom.yaml
+STATE=/etc/atomdns/dns-takeover.state
+TABLE=atomdns
+PRIO="dstnat - 10"
+
+lan_if() {
+	if [ -n "${ATOMDNS_LAN_IF:-}" ]; then
+		echo "$ATOMDNS_LAN_IF"
+		return
+	fi
+	iface=$(uci -q get network.lan.device)
+	[ -n "$iface" ] || iface=br-lan
+	echo "$iface"
+}
+
+port() {
+	# listen 的值形如 ":5335" 或 "0.0.0.0:5335"，取最后一个冒号后的端口。
+	awk -F'"' '/^[ \t]*listen:/ { v = $2; sub(/^.*:/, "", v); print v; exit }' "$CONF" 2>/dev/null
+}
+
+wait_listen() {
+	i=0
+	while [ "$i" -lt 12 ]; do
+		netstat -lnu 2>/dev/null | grep -q ":$1[[:space:]]" && return 0
+		netstat -lnt 2>/dev/null | grep -q ":$1[[:space:]]" && return 0
+		i=$((i + 1))
+		sleep 1
+	done
+	return 1
+}
+
+snapshot() {
+	[ -f "$STATE" ] && return 0
+	{
+		v=$(uci -q get dhcp.@dnsmasq[0].noresolv)
+		[ -n "$v" ] && echo "noresolv=$v"
+		uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | while IFS= read -r s; do
+			[ -n "$s" ] && echo "server=$s"
+		done
+	} > "$STATE"
+}
+
+apply_dnsmasq() {
+	snapshot
+	uci set dhcp.@dnsmasq[0].noresolv='1'
+	uci -q delete dhcp.@dnsmasq[0].server
+	uci add_list dhcp.@dnsmasq[0].server="127.0.0.1#$1"
+	uci commit dhcp
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+}
+
+restore_dnsmasq() {
+	[ -f "$STATE" ] || return 0
+	nr=$(sed -n 's/^noresolv=//p' "$STATE" | head -n1)
+	if [ -n "$nr" ]; then
+		uci set dhcp.@dnsmasq[0].noresolv="$nr"
+	else
+		uci -q delete dhcp.@dnsmasq[0].noresolv
+	fi
+	uci -q delete dhcp.@dnsmasq[0].server
+	sed -n 's/^server=//p' "$STATE" | while IFS= read -r s; do
+		[ -n "$s" ] && uci add_list dhcp.@dnsmasq[0].server="$s"
+	done
+	uci commit dhcp
+	rm -f "$STATE"
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+}
+
+apply_nft() {
+	nft delete table inet "$TABLE" 2>/dev/null
+	nft add table inet "$TABLE" || return 1
+	if ! nft add chain inet "$TABLE" prerouting "{ type nat hook prerouting priority $PRIO; policy accept; }"; then
+		# 极小概率与另一个进程删除表冲突，重建一次再试。
+		nft add table inet "$TABLE" 2>/dev/null
+		nft add chain inet "$TABLE" prerouting "{ type nat hook prerouting priority $PRIO; policy accept; }" || return 1
+	fi
+	nft add rule inet "$TABLE" prerouting iifname "$1" udp dport 53 counter redirect to :53 comment atomdns-lan-dns || return 1
+	nft add rule inet "$TABLE" prerouting iifname "$1" tcp dport 53 counter redirect to :53 comment atomdns-lan-dns || return 1
+}
+
+apply() {
+	# start_service 里调用时 procd 还没把进程拉起来，先等它出现。
+	i=0
+	while [ "$i" -lt 12 ] && ! pidof atomdns >/dev/null 2>&1; do
+		i=$((i + 1))
+		sleep 1
+	done
+	pidof atomdns >/dev/null 2>&1 || { echo "atomdns 未运行，忽略接管" >&2; return 1; }
+	p=$(port)
+	[ -n "$p" ] || { echo "配置里找不到 listen 端口" >&2; return 1; }
+	wait_listen "$p" || { echo "AtomDNS 端口 $p 未监听，忽略接管" >&2; return 1; }
+	apply_nft "$(lan_if)" || { echo "nft 规则创建失败" >&2; return 1; }
+	apply_dnsmasq "$p"
+	echo "已接管 DNS：LAN($(lan_if)) :53 -> dnsmasq -> 127.0.0.1:$p"
+}
+
+restore() {
+	nft delete table inet "$TABLE" 2>/dev/null
+	restore_dnsmasq
+	echo "已恢复原 DNS 配置"
+}
+
+status() {
+	r=0; pidof atomdns >/dev/null 2>&1 && r=1
+	t=0; nft list table inet "$TABLE" >/dev/null 2>&1 && t=1
+	s=false; [ -f "$STATE" ] && s=true
+	printf '{"running":%s,"takeover":%s,"port":"%s","state":%s}\n' "$r" "$t" "$(port)" "$s"
+}
+
+case "${1:-}" in
+	apply) apply ;;
+	restore) restore ;;
+	status) status ;;
+	recover)
+		# Boot guard: only when atomdns will not start by itself.
+		[ -x /etc/rc.d/S99atomdns ] && exit 0
+		restore_dnsmasq
+		;;
+	*)
+		echo "usage: $0 status|apply|restore|recover" >&2
+		exit 2
+		;;
+esac

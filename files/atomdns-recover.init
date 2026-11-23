@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# AtomDNS boot guard.
+#
+# The DNS takeover rewrites dnsmasq UCI settings; if atomdns was stopped but
+# the router reboots while its autostart is disabled, nothing would restore
+# dnsmasq. This guard runs late in boot, after dnsmasq, and restores only when
+# AtomDNS will not start by itself (S99atomdns missing).
+
+START=95
+
+boot() {
+	/usr/bin/atomdns-dnsctl recover >/dev/null 2>&1
+}
