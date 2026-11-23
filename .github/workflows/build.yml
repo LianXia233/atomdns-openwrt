@@ -10,6 +10,10 @@ on:
         description: 'Release version (vX.Y.Z)'
         required: true
         default: 'v1.0.0'
+      publish:
+        description: 'Create/update the GitHub Release for this version'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -170,7 +174,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -181,11 +185,16 @@ jobs:
           [ -f "$NOTES" ] || NOTES="docs/release-notes.md"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/atomdns-*.apk dist/SHA256SUMS --clobber
-          else
+          elif git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             gh release create "$TAG" dist/atomdns-*.apk dist/SHA256SUMS \
               --title "AtomDNS for OpenWrt ${TAG}" \
               --notes-file "$NOTES" \
               --verify-tag
+          else
+            gh release create "$TAG" dist/atomdns-*.apk dist/SHA256SUMS \
+              --title "AtomDNS for OpenWrt ${TAG}" \
+              --notes-file "$NOTES" \
+              --target "${GITHUB_SHA}"
           fi
           gh release view "$TAG" --json url,assets \
             --jq '{url: .url, assets: [.assets[].name]}'
