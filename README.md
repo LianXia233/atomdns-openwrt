@@ -167,10 +167,16 @@ cd <sdk> && make defconfig && make package/atomdns/compile V=s
 
 ## 📦 发布
 
+当前正式版：**[v1.0.0](https://github.com/LianXia233/atomdns-openwrt/releases/tag/v1.0.0)**
+（由 CI 自动构建并发布，tag 指向构建提交）
+
 | 资产 | 说明 |
 | --- | --- |
 | `atomdns-1.0.0-r1.apk` | 单包（程序 + 配置 + LuCI + 接管脚本） |
 | `SHA256SUMS` | 校验和 |
+
+`atomdns-1.0.0-r1.apk` sha256：
+`b3d4ae0a0dc1f2c5756f3aa92da335df355c87ed4b0a7db2afdff61fe2c1f2af`
 
 版本策略：`vX.Y.Z` 为打包发布版本；内置 AtomDNS 程序版本由
 `ATOMDNS_BUILD_VERSION` 注入，WebUI 清单同步为该版本。上游源码固定为 `v0.6.6`。
