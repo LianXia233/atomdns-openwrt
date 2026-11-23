@@ -73,8 +73,14 @@ jobs:
           set -euo pipefail
           python3 -m pip install --user \
             "ziglang==${ZIGLANG_VERSION}" "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}"
+          # ziglang 的 wheel 不安装 console script，二进制在包目录里。
+          ZIG=$(python3 -c 'import ziglang, os; print(os.path.join(os.path.dirname(ziglang.__file__), "zig"))')
+          test -x "$ZIG"
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$ZIG" "$HOME/.local/bin/zig"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/zig" version
+          "$HOME/.local/bin/cargo-zigbuild" --version
 
       - name: Build AtomDNS binary for aarch64 musl
         shell: bash
