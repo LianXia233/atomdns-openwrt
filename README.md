@@ -10,9 +10,9 @@ musl 二进制、默认配置、procd 服务、LuCI 页面、DNS 接管/恢复�
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `atomdns-0.6.6-r13.apk` | 7.0 MB | 单包：程序 + 配置 + LuCI + 接管脚本 |
+| `atomdns-0.6.6-r14.apk` | 7.0 MB | 单包：程序 + 配置 + LuCI + 接管脚本 |
 
-sha256：`ed73151f84a621493d0f99c4e8cacd67611ebad439726121df81eeff363dcff8`
+sha256：`ed1202aede3279377c38723b093998402f91178ef770025e818fd3e4e4214a63`
 
 包内结构：
 
@@ -68,9 +68,9 @@ table inet dnsmasq
 ## 安装
 
 ```sh
-scp dist/atomdns-0.6.6-r13.apk root@<router>:/tmp/
+scp dist/atomdns-0.6.6-r14.apk root@<router>:/tmp/
 ssh root@<router>
-apk add --allow-untrusted /tmp/atomdns-0.6.6-r13.apk
+apk add --allow-untrusted /tmp/atomdns-0.6.6-r14.apk
 ```
 
 自建包无签名索引，必须 `--allow-untrusted`。安装后 postinst 会：
@@ -98,8 +98,11 @@ apk add --allow-untrusted /tmp/atomdns-0.6.6-r13.apk
 - **配置 schema**：从本机 `/api/v1/system/health` 读 `required_config_schema` /
   `applied_config_schema`（全新安装显示“程序要求 7，已应用 0”）；
 - **DNS 接管状态**（已接管 / 未接管）；
-- **插件内日志**：直接展示 `logread` 中匹配 atomdns 的行与 AtomDNS 自身的
-  `/tmp/mosdns.log`，每 10 秒刷新，不跳转系统日志页；
+- **插件内日志**（不跳转系统日志页）：分四块显示——
+  **接管与服务**（logread 中 atomdns/atomdns-dnsctl/procd）、
+  **应用错误 / 应用警告 / 应用信息**（`/tmp/mosdns.log` 按级别）。
+  级别与来源用中文标注（如 `01:38:07 [错误] DNS 接管 · …`），日志正文保持原文；
+  每 10 秒刷新，并保留各块的滚动位置；
 - 启动 / 停止 / 重启 / 停止并禁用自启；
 - **打开 WebUI**（`http://<router>:9099/`，服务停止时置灰）；
 - **高级设置**：
@@ -124,7 +127,7 @@ ACL 只授予：读配置/manifest/`/proc`，执行 `atomdns` 与两个 ctl 脚�
 cp dist/atomdns-openwrt-0.6.6-aarch64.tar.gz <sdk>/dl/
 cp -r . <sdk>/package/atomdns
 cd <sdk> && make defconfig && make package/atomdns/compile V=s
-# 产物：bin/packages/aarch64_cortex-a53/base/atomdns-0.6.6-r13.apk
+# 产物：bin/packages/aarch64_cortex-a53/base/atomdns-0.6.6-r14.apk
 ```
 
 示例 SDK：`mediatek/filogic` snapshot（`aarch64_cortex-a53`，apk-tools 3.0.5）。
@@ -133,7 +136,7 @@ cd <sdk> && make defconfig && make package/atomdns/compile V=s
 
 设备：ImmortalWRT SNAPSHOT / mediatek-filogic / `aarch64_cortex-a53`，HomeProxy + sing-box TUN。
 
-- 安装 `atomdns-0.6.6-r13.apk`；`apk list -I` 显示 installed，服务 `running` + `enabled`。
+- 安装 `atomdns-0.6.6-r14.apk`；`apk list -I` 显示 installed，服务 `running` + `enabled`。
 - 自动接管：`atomdns-dnsctl status` → `{"running":1,"takeover":1,"port":"5335","state":true}`；
   nft 表 `inet atomdns` 计数增长；dnsmasq `noresolv=1`、`server=127.0.0.1#5335`。
 - LAN DNS（LAN 客户端 → 路由器）：`www.baidu.com` 返回国内 IP，

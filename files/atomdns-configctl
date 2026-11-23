@@ -46,10 +46,9 @@ schema() {
 logs() {
 	n=${1:-60}
 	case "$n" in ''|*[!0-9]*) n=60 ;; esac
-	echo "=== logread（过滤 atomdns） ==="
+	echo "@SERVICE"
 	logread 2>/dev/null | grep -i atomdns | tail -n "$n"
-	echo
-	echo "=== /tmp/mosdns.log（AtomDNS 自身日志） ==="
+	echo "@APP"
 	tail -n "$n" /tmp/mosdns.log 2>/dev/null
 }
 

@@ -12,7 +12,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=atomdns
 PKG_VERSION:=0.6.6
-PKG_RELEASE:=13
+PKG_RELEASE:=14
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_MAINTAINER:=jasonxtt <https://github.com/jasonxtt/atomdns>
@@ -21,7 +21,7 @@ PKG_MAINTAINER:=jasonxtt <https://github.com/jasonxtt/atomdns>
 # 注意 PKG_SOURCE 的架构后缀必须与实际二进制一致（当前为 aarch64）。
 PKG_SOURCE:=atomdns-openwrt-$(PKG_VERSION)-aarch64.tar.gz
 PKG_SOURCE_URL:=https://github.com/jasonxtt/atomdns/releases/download/v$(PKG_VERSION)
-PKG_HASH:=493f4aa5e8761b00426b65d1ab698e6ab1684bce43c88f604a27ff2a99d5ddd6
+PKG_HASH:=a41ac9063a713c5f7a3a635859c584205cc14eb556313b55b50dca206e76d8f5
 PKG_BUILD_DIR:=$(BUILD_DIR)/atomdns-openwrt-$(PKG_VERSION)-aarch64
 
 include $(INCLUDE_DIR)/package.mk

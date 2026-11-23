@@ -161,7 +161,7 @@ function loadStatus() {
 			status.schemaInfo = {};
 		}
 
-		status.logText = (results[10] && results[10].stdout) || '';
+		status.logRaw = (results[10] && results[10].stdout) || '';
 
 		if (results[4]) {
 			try {
@@ -248,6 +248,85 @@ function badge(text, ok) {
 			'font-size:12px;font-weight:600;color:#fff;background:' +
 			(ok ? '#2e7d32' : '#b71c1c')
 	}, text);
+}
+
+function formatAppTime(ts) {
+	var m = /^\d{4}-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(ts);
+
+	return m ? (m[1] + '-' + m[2] + ' ' + m[3] + ':' + m[4] + ':' + m[5]) : ts;
+}
+
+function formatServiceLine(line) {
+	var m = /^\w{3} \w{3}\s+\d+ (\d{2}:\d{2}:\d{2}) \d{4} (\S+) (\S+?)(?:\[\d+\])?: (.*)$/.exec(line);
+
+	if (!m)
+		return line;
+
+	var sev = m[2].split('.').pop();
+	var level = (sev === 'err' || sev === 'crit' || sev === 'alert' || sev === 'emerg')
+		? '错误'
+		: (sev === 'warn' || sev === 'warning') ? '警告'
+		: (sev === 'notice') ? '提示' : '信息';
+
+	var source = m[3] === 'atomdns' ? 'AtomDNS'
+		: m[3] === 'atomdns-dnsctl' ? 'DNS 接管'
+		: m[3] === 'procd' ? '进程管理'
+		: m[3] === 'dispatcher.uc' ? 'LuCI'
+		: m[3];
+
+	return m[1] + ' [' + level + '] ' + source + ' · ' + m[4];
+}
+
+function parseLogs(raw) {
+	var out = { service: [], error: [], warn: [], info: [] };
+	var section = '';
+
+	(raw || '').split('\n').forEach(function(line) {
+		line = line.replace(/\r$/, '');
+
+		if (line === '@SERVICE') { section = 'service'; return; }
+		if (line === '@APP') { section = 'app'; return; }
+		if (line.trim() === '') return;
+
+		if (section === 'service') {
+			out.service.push(formatServiceLine(line));
+		}
+		else if (section === 'app') {
+			var m = /^(\S+)\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+(.*)$/.exec(line);
+
+			if (!m) {
+				out.info.push(line);
+				return;
+			}
+
+			var body = formatAppTime(m[1]) + ' ' + m[3];
+
+			if (m[2] === 'ERROR')
+				out.error.push(body);
+			else if (m[2] === 'WARN')
+				out.warn.push(body);
+			else
+				out.info.push(body);
+		}
+	});
+
+	return out;
+}
+
+function logBlock(id, title, lines) {
+	var text = lines.length ? lines.slice(-40).join('\n') : '暂无';
+
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', { 'class': 'cbi-value-title' }, title + '（' + lines.length + '）'),
+		E('div', { 'class': 'cbi-value-field' }, [
+			E('pre', {
+				'id': 'atomdns-log-' + id,
+				'style': 'max-height:180px;overflow:auto;white-space:pre-wrap;' +
+					'font-size:12px;line-height:1.45;margin:0;' +
+					(lines.length ? '' : 'color:#888')
+			}, text)
+		])
+	]);
 }
 
 function kv(name, value) {
@@ -350,6 +429,14 @@ return view.extend({
 		}
 
 		function draw(status) {
+			var scroll = {};
+
+			[ 'service', 'error', 'warn', 'info' ].forEach(function(id) {
+				var el = document.getElementById('atomdns-log-' + id);
+				if (el)
+					scroll[id] = el.scrollTop;
+			});
+
 			while (container.firstChild)
 				container.removeChild(container.firstChild);
 
@@ -432,15 +519,14 @@ return view.extend({
 				E('table', { 'class': 'table' }, [ E('tbody', {}, rows) ])
 			]);
 
+			var parsed = parseLogs(status.logRaw);
 			var logs = E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '日志'),
-				E('p', {}, '每 10 秒刷新；只显示 logread 中匹配 atomdns 的行，以及 AtomDNS 自身的 /tmp/mosdns.log。'),
-				E('pre', {
-					'style': 'max-height:320px;overflow:auto;white-space:pre-wrap;' +
-						'font-size:12px;line-height:1.45'
-				}, (status.logText && status.logText.trim() !== '')
-					? status.logText
-					: '（暂无匹配日志）')
+				E('p', {}, '每 10 秒刷新。按来源/级别细分；级别与来源为中文标注，日志正文保持原文。'),
+				logBlock('service', '接管与服务', parsed.service),
+				logBlock('error', '应用错误', parsed.error),
+				logBlock('warn', '应用警告', parsed.warn),
+				logBlock('info', '应用信息', parsed.info)
 			]);
 
 			var advanced = E('div', { 'class': 'cbi-section' }, [
@@ -507,6 +593,12 @@ return view.extend({
 			container.appendChild(logs);
 			container.appendChild(advanced);
 			container.appendChild(hint);
+
+			[ 'service', 'error', 'warn', 'info' ].forEach(function(id) {
+				var el = document.getElementById('atomdns-log-' + id);
+				if (el && scroll[id])
+					el.scrollTop = scroll[id];
+			});
 		}
 
 		draw(initial);
