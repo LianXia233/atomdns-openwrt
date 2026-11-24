@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AtomDNS for OpenWrt | 纯 Rust 高性能 DNS 分流与接管套件</title>
+  <meta name="description" content="把 AtomDNS (MosDNS Rust 重构版) 打包成单个 OpenWrt APK：自带 LuCI 控制台、DNS 自动接管/毫秒恢复、30s 保活守卫，与 HomeProxy / sing-box 和谐共存。">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12'/></svg>">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eff6ff',
+              100: '#dbeafe',
+              200: '#bfdbfe',
+              300: '#93c5fd',
+              400: '#60a5fa',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8',
+              800: '#1e40af',
+              900: '#1e3a8a',
+            }
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'Fira Code', 'Menlo', 'Monaco', 'Consolas', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* 细腻浅色网格背景 */
+    .bg-grid-pattern {
+      background-image: radial-gradient(rgba(148, 163, 184, 0.22) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    /* 渐变标题 */
+    .text-gradient {
+      background: linear-gradient(135deg, #0f172a 0%, #2563eb 50%, #0284c7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    /* 卡片悬浮交互 */
+    .card-hover {
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .card-hover:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 30px -10px rgba(37, 99, 235, 0.12), 0 4px 6px -2px rgba(0, 0, 0, 0.04);
+    }
+    /* 代码滚动条 */
+    pre::-webkit-scrollbar {
+      height: 6px;
+    }
+    pre::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 9999px;
+    }
+    pre::-webkit-scrollbar-track {
+      background: #f1f5f9;
+    }
+  </style>
+</head>
+<body class="bg-[#ffffff] text-slate-800 antialiased selection:bg-brand-500 selection:text-white">
+
+  <!-- 顶部轻盈通知条 -->
+  <div class="bg-gradient-to-r from-blue-50 via-indigo-50 to-sky-50 border-b border-blue-100/80 text-blue-900 text-xs py-2 px-4 text-center font-medium">
+    <span>✨ AtomDNS for OpenWrt <strong class="text-brand-700 font-semibold">v1.0.0</strong> 正式发布 · 单包 APK · 内置 LuCI 控制台 · 抢先级 DNS 接管与保活</span>
+    <a href="https://github.com/LianXia233/atomdns-openwrt/releases/tag/v1.0.0" target="_blank" class="underline ml-2 text-brand-600 hover:text-brand-800 font-semibold inline-flex items-center gap-0.5">
+      查看 Release 资产
+      <svg class="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+    </a>
+  </div>
+
+  <!-- 顶部导航栏 -->
+  <header class="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-slate-200/80 transition-all">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <!-- Logo -->
+        <a href="#" class="flex items-center gap-2.5 group">
+          <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-brand-600 to-sky-500 flex items-center justify-center text-white shadow-md shadow-brand-500/20 group-hover:scale-105 transition-transform">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2v3M12 19v3M2 12h3M19 12h3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"/></svg>
+          </div>
+          <div class="flex flex-col">
+            <div class="flex items-center gap-1.5">
+              <span class="font-bold text-slate-900 tracking-tight text-lg">AtomDNS</span>
+              <span class="text-xs font-semibold px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded border border-slate-200">OpenWrt</span>
+            </div>
+            <span class="text-[10px] text-slate-400 font-mono leading-none -mt-0.5">aarch64_cortex-a53</span>
+          </div>
+        </a>
+      </div>
+
+      <!-- 导航链接 -->
+      <nav class="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600">
+        <a href="#features" class="hover:text-brand-600 transition-colors">核心特性</a>
+        <a href="#architecture" class="hover:text-brand-600 transition-colors">接管原理</a>
+        <a href="#luci-preview" class="hover:text-brand-600 transition-colors">LuCI 控制台</a>
+        <a href="#quickstart" class="hover:text-brand-600 transition-colors">快速开始</a>
+        <a href="#downloads" class="hover:text-brand-600 transition-colors">下载中心</a>
+        <a href="#faq" class="hover:text-brand-600 transition-colors">常见问题</a>
+      </nav>
+
+      <!-- 右侧操作 -->
+      <div class="flex items-center gap-3">
+        <a href="https://github.com/LianXia233/atomdns-openwrt" target="_blank" class="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 transition-colors">
+          <svg class="w-4 h-4 text-slate-800" fill="currentColor" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+          <span>Star 仓库</span>
+        </a>
+        <a href="#downloads" class="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 shadow-sm shadow-brand-500/30 rounded-lg px-3.5 py-1.5 transition-all">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          <span>获取 APK</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主视觉 Hero 区域 -->
+  <section class="relative pt-16 pb-20 overflow-hidden bg-grid-pattern">
+    <!-- 顶部环境光晕 -->
+    <div class="absolute inset-0 pointer-events-none flex justify-center">
+      <div class="w-[800px] h-[360px] bg-gradient-to-b from-blue-100/60 via-sky-50/40 to-transparent blur-3xl rounded-full -top-24"></div>
+    </div>
+
+    <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+      <!-- 徽章标签 -->
+      <div class="inline-flex items-center gap-2 px-3.5 py-1 rounded-full text-xs font-medium bg-white text-slate-700 border border-slate-200/90 shadow-sm mb-6">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span class="text-slate-500">面向</span>
+        <span class="font-semibold text-slate-800">OpenWrt 24.x / ImmortalWrt SNAPSHOT (apk-tools 3)</span>
+      </div>
+
+      <!-- 主标题 -->
+      <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-slate-900 max-w-4xl mx-auto leading-[1.15]">
+        纯 Rust 极致轻量 <br>
+        <span class="text-gradient">OpenWrt DNS 智能分流与自愈接管套件</span>
+      </h1>
+
+      <!-- 副标题 -->
+      <p class="mt-6 text-lg sm:text-xl text-slate-600 max-w-3xl mx-auto leading-relaxed">
+        基于 <a href="https://github.com/jasonxtt/atomdns" target="_blank" class="font-medium text-brand-600 hover:underline">AtomDNS</a>（纯 Rust 版 MosDNS），封装为单包 APK。自带精美 LuCI 控制台、智能优先级 Nat 抢占与 30s 自愈守卫，与 HomeProxy / sing-box 和谐共存，永无断网风险。
+      </p>
+
+      <!-- 快速安装命令展示框 -->
+      <div class="mt-8 max-w-xl mx-auto">
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-2 flex items-center justify-between text-left">
+          <div class="flex items-center gap-2.5 px-2 overflow-x-auto text-xs font-mono text-slate-800">
+            <span class="text-slate-400 select-none">#</span>
+            <span id="quick-cmd" class="whitespace-nowrap">apk add --allow-untrusted /tmp/atomdns-1.0.0-r1.apk</span>
+          </div>
+          <button onclick="copyToClipboard('quick-cmd', this)" class="shrink-0 flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors">
+            <svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span class="copy-label">复制</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 操作按钮群 -->
+      <div class="mt-8 flex flex-wrap items-center justify-center gap-4">
+        <a href="#downloads" class="inline-flex items-center gap-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/25 rounded-xl px-6 py-3 transition-all hover:scale-[1.02]">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          <span>立即下载 v1.0.0 (APK)</span>
+        </a>
+        <a href="#architecture" class="inline-flex items-center gap-2 text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200/90 shadow-sm rounded-xl px-6 py-3 transition-all hover:scale-[1.02]">
+          <svg class="w-4 h-4 text-brand-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          <span>查看接管拓扑与原理</span>
+        </a>
+        <a href="https://github.com/LianXia233/atomdns-openwrt" target="_blank" class="inline-flex items-center gap-2 text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200/90 shadow-sm rounded-xl px-5 py-3 transition-all">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+
+      <!-- 4 大核心指标卡片 -->
+      <div class="mt-14 grid grid-cols-2 lg:grid-cols-4 gap-4 max-w-5xl mx-auto">
+        <div class="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm card-hover text-left">
+          <div class="w-8 h-8 rounded-lg bg-blue-50 text-brand-600 flex items-center justify-center mb-3">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+          </div>
+          <div class="text-2xl font-bold text-slate-900 tracking-tight">单包 APK</div>
+          <div class="text-xs text-slate-500 mt-1">集成程序/配置/LuCI/接管脚本，无多余外部依赖</div>
+        </div>
+
+        <div class="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm card-hover text-left">
+          <div class="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center mb-3">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <div class="text-2xl font-bold text-slate-900 tracking-tight">Rust 静态 musl</div>
+          <div class="text-xs text-slate-500 mt-1">仅占用约 18MB 内存，官方 Rust 1.96 编译性能强劲</div>
+        </div>
+
+        <div class="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm card-hover text-left">
+          <div class="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <div class="text-2xl font-bold text-slate-900 tracking-tight">-10 抢先接管</div>
+          <div class="text-xs text-slate-500 mt-1">超越 HomeProxy 与 fw4 优先级，无缝夺回 DNS 控制权</div>
+        </div>
+
+        <div class="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm card-hover text-left">
+          <div class="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          </div>
+          <div class="text-2xl font-bold text-slate-900 tracking-tight">30s 守卫自愈</div>
+          <div class="text-xs text-slate-500 mt-1">后台 watchdog 巡检，防火墙重载被洗规则时毫秒修回</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 架构原理与接管机制 (重点剖析) -->
+  <section id="architecture" class="py-20 bg-slate-50/60 border-y border-slate-200/80">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-brand-600 mb-2">DNS Takeover Architecture</h2>
+        <p class="text-3xl font-extrabold text-slate-900">为什么传统 OpenWrt 插件改 DNS 总失效？</p>
+        <p class="mt-4 text-slate-600 text-sm sm:text-base leading-relaxed">
+          许多软路由安装了 HomeProxy 或 sing-box，它们在 Nat 规则中拥有极高的优先度，会直接在 LAN 53 端口前拦截所有流量送进代理 TUN，被压在后面的 dnsmasq 上游修改完全无效！AtomDNS 采用更早的 priority 规则，彻底破解劫持冲突。
+        </p>
+      </div>
+
+      <!-- 优先级对比表 -->
+      <div class="mt-12 max-w-4xl mx-auto bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div class="p-4 sm:p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-slate-900 text-base">Netfilter (nftables) 链路优先级竞争分析</h3>
+            <p class="text-xs text-slate-500 mt-0.5">优先级数值越小越先被执行（数值低优先命中）</p>
+          </div>
+          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 self-start">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+            AtomDNS 绝对优先胜出
+          </span>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs sm:text-sm">
+            <thead>
+              <tr class="bg-slate-50/70 border-b border-slate-200 text-slate-600 font-semibold">
+                <th class="py-3 px-4 sm:px-6">执行链 / 来源</th>
+                <th class="py-3 px-4">Priority (优先级)</th>
+                <th class="py-3 px-4">捕获行为</th>
+                <th class="py-3 px-4 sm:px-6">命中状态</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 text-slate-700 font-mono">
+              <tr class="bg-blue-50/40">
+                <td class="py-3.5 px-4 sm:px-6 font-semibold text-brand-700 font-sans flex items-center gap-2">
+                  <span class="w-2 h-2 rounded-full bg-brand-600"></span>
+                  table inet atomdns (本套件)
+                </td>
+                <td class="py-3.5 px-4 text-brand-700 font-bold">dstnat - 10</td>
+                <td class="py-3.5 px-4 font-sans text-xs text-slate-800">iifname br-lan 53 重定向到指定端口</td>
+                <td class="py-3.5 px-4 sm:px-6 font-sans"><span class="px-2 py-0.5 rounded bg-brand-100 text-brand-700 text-xs font-semibold">率先命中 ⭐</span></td>
+              </tr>
+              <tr class="text-slate-500">
+                <td class="py-3.5 px-4 sm:px-6 font-sans">sing-box prerouting_prematch</td>
+                <td class="py-3.5 px-4">dstnat - 1</td>
+                <td class="py-3.5 px-4 font-sans text-xs">前置匹配</td>
+                <td class="py-3.5 px-4 sm:px-6 font-sans"><span class="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">已接管跳过</span></td>
+              </tr>
+              <tr class="text-slate-500">
+                <td class="py-3.5 px-4 sm:px-6 font-sans">HomeProxy / sing-box prerouting</td>
+                <td class="py-3.5 px-4 text-amber-600 font-semibold">dstnat + 2</td>
+                <td class="py-3.5 px-4 font-sans text-xs">LAN :53 强行 DNAT 进 TUN 代理</td>
+                <td class="py-3.5 px-4 sm:px-6 font-sans"><span class="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">已被提前接管</span></td>
+              </tr>
+              <tr class="text-slate-400">
+                <td class="py-3.5 px-4 sm:px-6 font-sans">dnsmasq prerouting</td>
+                <td class="py-3.5 px-4">dstnat + 5</td>
+                <td class="py-3.5 px-4 font-sans text-xs">常规路由器监听</td>
+                <td class="py-3.5 px-4 sm:px-6 font-sans"><span class="px-2 py-0.5 rounded bg-slate-100 text-slate-400 text-xs">压在最后</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 动态交互：Relay 模式 vs Direct 模式网络拓扑图 -->
+      <div class="mt-14 max-w-4xl mx-auto">
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100">
+            <div>
+              <h3 class="text-lg font-bold text-slate-900">接管流量流向与模式切换</h3>
+              <p class="text-xs text-slate-500 mt-1">在 LuCI 高级设置中可一键切换，立即生效并持久化</p>
+            </div>
+            <!-- 模式切换 Tabs -->
+            <div class="inline-flex p-1 bg-slate-100 rounded-xl text-xs font-semibold">
+              <button id="btn-mode-relay" onclick="switchMode('relay')" class="px-4 py-2 rounded-lg bg-white text-brand-700 shadow-sm transition-all">
+                Relay 模式 (默认推荐)
+              </button>
+              <button id="btn-mode-direct" onclick="switchMode('direct')" class="px-4 py-2 rounded-lg text-slate-600 hover:text-slate-900 transition-all">
+                Direct 直连模式 (审计真实IP)
+              </button>
+            </div>
+          </div>
+
+          <!-- 模式 1: Relay 视图 -->
+          <div id="view-mode-relay" class="pt-6">
+            <div class="p-4 bg-blue-50/50 rounded-xl border border-blue-100 mb-6 flex items-start gap-3">
+              <svg class="w-5 h-5 text-brand-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <div class="text-xs text-slate-700 leading-relaxed">
+                <strong class="text-brand-900 font-semibold">Relay 模式特点：</strong>
+                LAN 客户端发送到 53 的 DNS 请求经由 dnsmasq 转发到 AtomDNS 5335。<br>
+                <span class="text-emerald-700 font-semibold">优势：</span>完美保留路由器本地 DHCP 名字（如 <code class="bg-white px-1 py-0.5 rounded border border-blue-200">my-nas.lan</code>）解析。<br>
+                <span class="text-slate-500">审计日志：</span>客户端身份统一显示为 <code class="bg-white px-1 py-0.5 rounded border border-blue-200">127.0.0.1</code>。
+              </div>
+            </div>
+
+            <!-- 拓扑示意卡片流 -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-center text-xs">
+              <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-center items-center">
+                <span class="text-slate-400 font-mono text-[10px]">Step 1</span>
+                <span class="font-bold text-slate-800 text-sm mt-1">LAN 客户端</span>
+                <span class="text-slate-500 mt-1 font-mono">请求 :53</span>
+              </div>
+              <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-center items-center">
+                <span class="text-slate-400 font-mono text-[10px]">Step 2</span>
+                <span class="font-bold text-slate-800 text-sm mt-1">dnsmasq :53</span>
+                <span class="text-emerald-600 font-semibold mt-1">解析 .lan 本地主机</span>
+              </div>
+              <div class="p-4 rounded-xl bg-blue-50/70 border border-brand-200 flex flex-col justify-center items-center">
+                <span class="text-brand-500 font-mono text-[10px]">Step 3</span>
+                <span class="font-bold text-brand-900 text-sm mt-1">AtomDNS :5335</span>
+                <span class="text-brand-600 font-semibold mt-1">SRS 规则库智能分流</span>
+              </div>
+              <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-center items-center">
+                <span class="text-slate-400 font-mono text-[10px]">Step 4</span>
+                <span class="font-bold text-slate-800 text-sm mt-1">上游解析</span>
+                <span class="text-slate-600 mt-1">国内直连 / 国外代理</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 模式 2: Direct 视图 -->
+          <div id="view-mode-direct" class="pt-6 hidden">
+            <div class="p-4 bg-amber-50/50 rounded-xl border border-amber-100 mb-6 flex items-start gap-3">
+              <svg class="w-5 h-5 text-amber-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              <div class="text-xs text-slate-700 leading-relaxed">
+                <strong class="text-amber-900 font-semibold">Direct 直连模式特点：</strong>
+                LAN 客户端对 53 的请求直接由 nat 链重定向到 AtomDNS 5335，完全绕过 dnsmasq。<br>
+                <span class="text-emerald-700 font-semibold">优势：</span>AtomDNS 控制台与审计日志中可精准记录每台终端真实的内网 IP (如 <code class="bg-white px-1 py-0.5 rounded border border-amber-200">192.168.1.108</code>)。<br>
+                <span class="text-amber-700">注意：</span>将无法通过 dnsmasq 自动解析 DHCP <code class="bg-white px-1 py-0.5 rounded border border-amber-200">.lan</code> 域名（可按需写入 hosts）。
+              </div>
+            </div>
+
+            <!-- 拓扑示意卡片流 -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-center text-xs">
+              <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-center items-center">
+                <span class="text-slate-400 font-mono text-[10px]">Step 1</span>
+                <span class="font-bold text-slate-800 text-sm mt-1">LAN 终端设备</span>
+                <span class="text-slate-500 mt-1 font-mono">192.168.1.X:53</span>
+              </div>
+              <div class="p-4 rounded-xl bg-brand-50/80 border border-brand-300 flex flex-col justify-center items-center">
+                <span class="text-brand-500 font-mono text-[10px]">Step 2 (直接命中)</span>
+                <span class="font-bold text-brand-900 text-sm mt-1">AtomDNS :5335</span>
+                <span class="text-brand-600 font-semibold mt-1">记录真实客户端 IP 审计</span>
+              </div>
+              <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-center items-center">
+                <span class="text-slate-400 font-mono text-[10px]">Step 3</span>
+                <span class="font-bold text-slate-800 text-sm mt-1">分流器出口</span>
+                <span class="text-slate-600 mt-1">国内腾讯/阿里 DoH · 国外 sing-box</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 大核心功能特性 (矩阵卡片) -->
+  <section id="features" class="py-20 bg-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-brand-600 mb-2">Comprehensive Features</h2>
+        <p class="text-3xl font-extrabold text-slate-900">为生产级软路由打磨的 12 项匠心特性</p>
+        <p class="mt-4 text-slate-600 text-sm sm:text-base">从底层内核 nat 劫持、服务守护，到上层现代 Web 控制台，全链路闭环保障稳定运行。</p>
+      </div>
+
+      <div class="mt-14 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- 1. 单包打包 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-blue-50 text-brand-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🧩 单包完整安装</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">一个 <code class="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">.apk</code> 包含了核心程序、优化配置、procd 守护、LuCI 管理页面与全部接管控制脚本，无需四处找依赖。</p>
+        </div>
+
+        <!-- 2. DNS 自动接管 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🔀 DNS 自动接管</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">启动服务即可把 LAN 的 :53 端口流量交给 dnsmasq 处理，再转发到 AtomDNS :5335，并无缝注入抢占规则。</p>
+        </div>
+
+        <!-- 3. 可逆恢复 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">↩️ 毫秒级可逆恢复</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">自动留存系统 dnsmasq 的快照状态。停止服务时自动清理 nft 规则并还原快照，全屋网络瞬间平滑回退，零断网风险。</p>
+        </div>
+
+        <!-- 4. 失败安全 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🛡 失败安全保护</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">原子化状态检查：若 AtomDNS 进程异常未能监听端口，接管脚本绝不会修改 dnsmasq，避免把全网 DNS 指向死端口。</p>
+        </div>
+
+        <!-- 5. LuCI 控制台 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🖥 LuCI 原生控制台</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">基于现代 JavaScript 原生编写（无冗余 Lua CBI 依赖），提供内存、PID、运行时间、接管开关、端口与模式配置。</p>
+        </div>
+
+        <!-- 6. 内置日志 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">📜 中文结构化日志</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">日志直观展示中文标注，支持按来源（服务、接管、守卫）与级别（INFO、WARN、ERROR）过滤，不必费劲跳转系统日志。</p>
+        </div>
+
+        <!-- 7. 代理友好 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🚀 代理透明共存</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">默认 RealIP，国外 DoH 通过 HomeProxy/sing-box 的 TUN 自动走代理，防止 DNS 污染；也可指定 SOCKS5 上游。</p>
+        </div>
+
+        <!-- 8. 开机守卫 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🔁 开机回滚守卫</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">即使关闭了自启后重启路由器，专属 recover 启动脚本仍会在引导阶段自动还原 dnsmasq 默认配置，绝不留暗坑。</p>
+        </div>
+
+        <!-- 9. 30秒接管保活 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-blue-50 text-brand-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🛡 30秒接管保活自愈</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">procd 常驻 watchdog 实例每 30 秒自检。当 HomeProxy、fw4 重启或手动改动冲刷了 nft 链，自动修回接管规则。</p>
+        </div>
+
+        <!-- 10. 客户端真实记录 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🧑‍💻 真实客户端模式</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">在 LuCI 高级设置中可随心切换 <code class="font-mono text-xs">relay</code> 与 <code class="font-mono text-xs">direct</code> 模式，满足局域网名字解析与终端精准审计两种诉求。</p>
+        </div>
+
+        <!-- 11. CI 规则注入 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🧬 CI 智能规则注入</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">构建阶段自动同步最新 SRS 分流规则，内置腾讯与阿里 DoH / DoT 优化配置，并注入中国大陆直连白名单。</p>
+        </div>
+
+        <!-- 12. CI 自动化流水线 -->
+        <div class="p-6 rounded-2xl bg-white border border-slate-200/90 shadow-sm card-hover">
+          <div class="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <h3 class="text-base font-bold text-slate-900">🧪 规范的自动化流水线</h3>
+          <p class="text-xs text-slate-600 mt-2 leading-relaxed">GitHub Actions 驱动：rustup 1.96 交叉编译静态二进制 → 校验 sha256 组装源包 → 官方 SDK 打包 apk → 发布 Release。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LuCI 控制台与 WebUI 真实模拟演示 -->
+  <section id="luci-preview" class="py-20 bg-slate-50/70 border-t border-slate-200/80">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-brand-600 mb-2">Native Web Console</h2>
+        <p class="text-3xl font-extrabold text-slate-900">优雅清爽的 LuCI 控制台体验</p>
+        <p class="mt-4 text-slate-600 text-sm sm:text-base">纯 JavaScript 视图构建，零卡顿。支持实时开关服务、监控进程资源、一键切换接管模式与结构化日志查验。</p>
+      </div>
+
+      <!-- 模拟器窗口容器 -->
+      <div class="mt-12 max-w-5xl mx-auto bg-white rounded-2xl border border-slate-300/80 shadow-xl overflow-hidden">
+        <!-- 窗口标题栏 -->
+        <div class="bg-slate-100/80 px-4 py-3 border-b border-slate-200 flex items-center justify-between select-none">
+          <div class="flex items-center gap-2">
+            <div class="w-3 h-3 rounded-full bg-rose-400"></div>
+            <div class="w-3 h-3 rounded-full bg-amber-400"></div>
+            <div class="w-3 h-3 rounded-full bg-emerald-400"></div>
+            <span class="ml-2 text-xs font-mono text-slate-500">OpenWrt LuCI &gt; 服务 &gt; AtomDNS</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs font-mono text-slate-400">
+            <span>http://192.168.1.1/cgi-bin/luci/admin/services/atomdns</span>
+          </div>
+        </div>
+
+        <!-- 模拟 LuCI 主体 -->
+        <div class="p-6 sm:p-8">
+          <!-- 运行状态横幅 -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-6 border-b border-slate-100 gap-4">
+            <div>
+              <div class="flex items-center gap-2.5">
+                <h3 class="text-xl font-bold text-slate-900">AtomDNS 概览</h3>
+                <span id="luci-status-badge" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  运行中 · 已接管 DNS
+                </span>
+              </div>
+              <p class="text-xs text-slate-500 mt-1">MosDNS 纯 Rust 重构版 DNS 分流与缓存服务 (aarch64_cortex-a53)</p>
+            </div>
+            
+            <div class="flex items-center gap-2">
+              <button onclick="toggleService()" id="btn-toggle-service" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 transition-colors">
+                停止服务
+              </button>
+              <a href="http://192.168.1.1:9099" target="_blank" onclick="alert('提示：这是模拟界面，真实环境中将跳转至您的路由器内网 http://<router>:9099/'); return false;" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-white hover:bg-brand-700 shadow-sm transition-colors flex items-center gap-1">
+                <span>打开 AtomDNS WebUI</span>
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+              </a>
+            </div>
+          </div>
+
+          <!-- 核心运行指标网格 -->
+          <div class="mt-6 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] text-slate-500">主进程 PID</div>
+              <div id="sim-pid" class="text-base font-bold font-mono text-slate-900 mt-0.5">14285</div>
+            </div>
+            <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] text-slate-500">内存占用 (RSS)</div>
+              <div id="sim-mem" class="text-base font-bold font-mono text-brand-600 mt-0.5">18.4 MB</div>
+            </div>
+            <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] text-slate-500">运行时长</div>
+              <div class="text-base font-bold text-slate-900 mt-0.5">4 天 16 小时</div>
+            </div>
+            <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] text-slate-500">程序版本</div>
+              <div class="text-base font-bold font-mono text-slate-900 mt-0.5">v0.6.6</div>
+            </div>
+            <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] text-slate-500">DNS 监听端口</div>
+              <div class="text-base font-bold font-mono text-slate-900 mt-0.5">5335</div>
+            </div>
+            <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div class="text-[11px] text-slate-500">保活巡检守卫</div>
+              <div class="text-base font-bold text-emerald-600 mt-0.5 flex items-center gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                30s 正常
+              </div>
+            </div>
+          </div>
+
+          <!-- 控制与高级开关选项卡 -->
+          <div class="mt-8 border border-slate-200 rounded-xl overflow-hidden">
+            <div class="bg-slate-50/80 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
+              <span class="text-xs font-bold text-slate-700">高级设置与接管配置</span>
+              <span class="text-[11px] text-slate-500">即改即存，自动更新 /etc/atomdns/ 配置文件</span>
+            </div>
+            <div class="p-4 sm:p-6 divide-y divide-slate-100 text-xs">
+              <!-- 开关项 1: 接管开关 -->
+              <div class="py-3 flex items-center justify-between">
+                <div>
+                  <div class="font-bold text-slate-800 text-sm">LAN DNS 接管 (nat -10)</div>
+                  <div class="text-slate-500 mt-0.5">自动重定向 LAN :53，并修改 dnsmasq 默认转发至 AtomDNS 5335</div>
+                </div>
+                <button onclick="toggleTakeover()" id="switch-takeover" class="w-11 h-6 bg-brand-600 rounded-full transition-colors relative flex items-center p-0.5">
+                  <div id="switch-takeover-thumb" class="w-5 h-5 bg-white rounded-full shadow-md transform translate-x-5 transition-transform"></div>
+                </button>
+              </div>
+
+              <!-- 开关项 2: 客户端记录模式 -->
+              <div class="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <div class="font-bold text-slate-800 text-sm">客户端记录模式</div>
+                  <div class="text-slate-500 mt-0.5">选择是保留本地 DHCP 主机名，还是记录 LAN 终端真实源 IP</div>
+                </div>
+                <div class="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-100">
+                  <button id="radio-relay" onclick="setMode('relay')" class="px-3 py-1 rounded-md text-xs font-semibold bg-white text-slate-800 shadow-sm">relay (保留.lan)</button>
+                  <button id="radio-direct" onclick="setMode('direct')" class="px-3 py-1 rounded-md text-xs font-semibold text-slate-500 hover:text-slate-800">direct (真实IP)</button>
+                </div>
+              </div>
+
+              <!-- 项 3: SOCKS5 代理 -->
+              <div class="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <div class="font-bold text-slate-800 text-sm">国外组 SOCKS5 代理地址</div>
+                  <div class="text-slate-500 mt-0.5">留空时自动经 sing-box TUN 直连分流；可填入 HomeProxy 的入站端口</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input type="text" value="127.0.0.1:5330" class="border border-slate-200 rounded-lg px-2.5 py-1 text-xs font-mono text-slate-800 bg-slate-50 w-36" readonly>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 模拟器内置实时日志查看窗 -->
+          <div class="mt-8 border border-slate-200 rounded-xl overflow-hidden bg-slate-900 text-slate-200 font-mono text-xs">
+            <div class="bg-slate-800/90 px-4 py-2 border-b border-slate-700 flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span class="font-semibold text-white text-[11px]">内置日志流 (近 60 秒)</span>
+              </div>
+              <div class="flex items-center gap-1.5 text-[10px]">
+                <span class="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300">中文标注</span>
+                <span class="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300">自动轮询</span>
+              </div>
+            </div>
+            <div class="p-4 space-y-1.5 max-h-48 overflow-y-auto text-[11px] leading-relaxed">
+              <div class="text-slate-400">[保活] 每 30s 自检：inet atomdns 接管链完整，dnsmasq 上游正常 (127.0.0.1#5335)</div>
+              <div><span class="text-emerald-400 font-semibold">[国内直连]</span> query: <span class="text-white">api.weixin.qq.com</span> A (阿里 DoH 223.5.5.5 - 耗时 7ms)</div>
+              <div><span class="text-sky-400 font-semibold">[代理分流]</span> query: <span class="text-white">github.com</span> A (sing-box TUN Google DoH - 耗时 32ms)</div>
+              <div><span class="text-amber-400 font-semibold">[缓存命中]</span> query: <span class="text-white">www.taobao.com</span> A (TTL 285s - 耗时 0.2ms)</div>
+              <div class="text-slate-400">[规则拦截] query: adservice.google.com -> 命中内置广告拦截规则，返回 NXDOMAIN</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 快速开始 / 安装使用指南 -->
+  <section id="quickstart" class="py-20 bg-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-brand-600 mb-2">Getting Started</h2>
+        <p class="text-3xl font-extrabold text-slate-900">3 步完成安装与接管</p>
+        <p class="mt-4 text-slate-600 text-sm sm:text-base">无需繁琐的编译与复杂的 iptables / nft 规则调试，标准 apk 单包开箱即用。</p>
+      </div>
+
+      <div class="mt-14 max-w-4xl mx-auto space-y-6">
+        <!-- 步骤 1 -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-7">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="w-7 h-7 rounded-full bg-brand-600 text-white font-bold text-xs flex items-center justify-center">1</span>
+            <h3 class="text-base font-bold text-slate-900">下载并传输 APK 安装包到路由器</h3>
+          </div>
+          <p class="text-xs text-slate-600 mb-3">从 Release 页面下载最新的 <code class="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">atomdns-1.0.0-r1.apk</code>，通过 scp 上传至软路由 <code class="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">/tmp/</code>：</p>
+          <div class="bg-slate-900 rounded-xl p-3.5 relative group">
+            <pre class="text-xs font-mono text-slate-100 overflow-x-auto"><code id="code-step1">scp atomdns-1.0.0-r1.apk root@192.168.1.1:/tmp/</code></pre>
+            <button onclick="copyToClipboard('code-step1', this)" class="absolute top-2.5 right-2.5 text-xs text-slate-400 hover:text-white bg-slate-800 px-2 py-1 rounded transition-colors">复制</button>
+          </div>
+        </div>
+
+        <!-- 步骤 2 -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-7">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="w-7 h-7 rounded-full bg-brand-600 text-white font-bold text-xs flex items-center justify-center">2</span>
+            <h3 class="text-base font-bold text-slate-900">执行 APK 安装（自动初始化并启动）</h3>
+          </div>
+          <p class="text-xs text-slate-600 mb-3">SSH 登录路由器，使用 apk-tools 执行安装（自建包带 <code class="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">--allow-untrusted</code>）：</p>
+          <div class="bg-slate-900 rounded-xl p-3.5 relative group">
+            <pre class="text-xs font-mono text-slate-100 overflow-x-auto"><code id="code-step2">ssh root@192.168.1.1
+apk add --allow-untrusted /tmp/atomdns-1.0.0-r1.apk</code></pre>
+            <button onclick="copyToClipboard('code-step2', this)" class="absolute top-2.5 right-2.5 text-xs text-slate-400 hover:text-white bg-slate-800 px-2 py-1 rounded transition-colors">复制</button>
+          </div>
+          <div class="mt-4 p-3.5 bg-blue-50/60 rounded-xl border border-blue-100 text-xs text-slate-700 leading-relaxed">
+            <span class="font-semibold text-brand-900">✨ 安装后服务端口：</span>
+            DNS 监听 <code class="font-mono bg-white px-1 py-0.5 rounded border border-blue-200">127.0.0.1:5335</code> · 
+            独立 WebUI <code class="font-mono bg-white px-1 py-0.5 rounded border border-blue-200">http://&lt;router&gt;:9099/</code> · 
+            LuCI 菜单在 <strong class="text-brand-900">「服务 → AtomDNS」</strong>
+          </div>
+        </div>
+
+        <!-- 步骤 3 -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-7">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="w-7 h-7 rounded-full bg-brand-600 text-white font-bold text-xs flex items-center justify-center">3</span>
+            <h3 class="text-base font-bold text-slate-900">确认 dnsmasq 转发（可选确认）</h3>
+          </div>
+          <p class="text-xs text-slate-600 mb-3">服务启动时会自动做好接管与状态快照备份；若需手动确认，可执行如下 uci 指令：</p>
+          <div class="bg-slate-900 rounded-xl p-3.5 relative group">
+            <pre class="text-xs font-mono text-slate-100 overflow-x-auto"><code id="code-step3">uci set dhcp.@dnsmasq[0].noresolv='1'
+uci -q delete dhcp.@dnsmasq[0].server
+uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5335'
+uci commit dhcp
+/etc/init.d/dnsmasq restart</code></pre>
+            <button onclick="copyToClipboard('code-step3', this)" class="absolute top-2.5 right-2.5 text-xs text-slate-400 hover:text-white bg-slate-800 px-2 py-1 rounded transition-colors">复制</button>
+          </div>
+        </div>
+
+        <!-- 步骤 4: 与 HomeProxy / sing-box 联动要点 -->
+        <div class="bg-gradient-to-br from-indigo-50/40 via-white to-blue-50/30 rounded-2xl border border-indigo-100 p-6 sm:p-7">
+          <div class="flex items-center gap-2.5 mb-3 text-indigo-900 font-bold text-sm">
+            <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span>与 HomeProxy / sing-box 协同共存注意事项</span>
+          </div>
+          <ul class="text-xs text-slate-600 space-y-2 list-disc list-inside leading-relaxed">
+            <li><strong>避免回环：</strong>代理客户端（HomeProxy/sing-box）自身的内部 bootstrap DNS <strong>切勿</strong>指向 AtomDNS 5335，请保持它自用的 bootstrap/DoH 上游。</li>
+            <li><strong>SOCKS 地址规范：</strong>AtomDNS 国外组填写的 SOCKS5 代理只接受 <code class="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">IP:端口</code>（如 <code class="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">127.0.0.1:5330</code>），不接受域名。</li>
+            <li><strong>自愈防护：</strong>当保存并应用 HomeProxy 导致防火墙规则被重刷时，AtomDNS 的 30 秒后台巡检守卫会自动修回，您无需手动干预。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 下载中心与版本校验 -->
+  <section id="downloads" class="py-20 bg-slate-50/70 border-t border-slate-200/80">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-brand-600 mb-2">Releases & Artifacts</h2>
+        <p class="text-3xl font-extrabold text-slate-900">版本发布与安装包下载</p>
+        <p class="mt-4 text-slate-600 text-sm sm:text-base">由 GitHub Actions 官方流水线通过 rustup 与 OpenWrt 官方 SDK 自动打标签并构建发布。</p>
+      </div>
+
+      <div class="mt-12 max-w-4xl mx-auto bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-6 border-b border-slate-100 gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-lg font-bold text-slate-900">正式版 v1.0.0</span>
+              <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">Latest</span>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">内置 AtomDNS v0.6.6 核心 · 架构 aarch64_cortex-a53 · musl 静态二进制</p>
+          </div>
+          <a href="https://github.com/LianXia233/atomdns-openwrt/releases" target="_blank" class="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-800 bg-blue-50 px-3.5 py-2 rounded-xl transition-colors self-start">
+            <span>浏览所有 Releases</span>
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+          </a>
+        </div>
+
+        <div class="mt-6 space-y-4">
+          <!-- 文件卡片 1: APK -->
+          <div class="p-4 rounded-xl border border-slate-200 hover:border-brand-300 bg-slate-50/50 hover:bg-blue-50/20 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 rounded-lg bg-brand-100 text-brand-700 flex items-center justify-center shrink-0">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+              </div>
+              <div>
+                <div class="font-bold text-slate-900 text-sm flex items-center gap-2">
+                  <span>atomdns-1.0.0-r1.apk</span>
+                  <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-200 text-slate-700">~6.4 MB</span>
+                </div>
+                <div class="text-xs text-slate-500 mt-1 font-mono break-all">
+                  SHA256: <span id="sha-apk">b3d4ae0a0dc1f2c5756f3aa92da335df355c87ed4b0a7db2afdff61fe2c1f2af</span>
+                </div>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <button onclick="copyToClipboard('sha-apk', this)" class="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 transition-colors">
+                复制哈希
+              </button>
+              <a href="https://github.com/LianXia233/atomdns-openwrt/releases/download/v1.0.0/atomdns-1.0.0-r1.apk" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white shadow-sm transition-colors flex items-center gap-1">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                <span>下载 APK</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- 文件卡片 2: SHA256SUMS -->
+          <div class="p-4 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50/50 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+              </div>
+              <div>
+                <div class="font-bold text-slate-900 text-sm">SHA256SUMS</div>
+                <div class="text-xs text-slate-500 mt-1">官方发布的完整校验和签名文件</div>
+              </div>
+            </div>
+            <a href="https://github.com/LianXia233/atomdns-openwrt/releases/download/v1.0.0/SHA256SUMS" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 transition-colors self-start sm:self-center">
+              下载校验文件
+            </a>
+          </div>
+        </div>
+
+        <!-- 硬件架构提示 -->
+        <div class="mt-6 p-4 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-600 flex items-start gap-2.5">
+          <svg class="w-4 h-4 text-slate-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>
+          <div>
+            <strong>适配架构：</strong> <code class="font-mono text-slate-800">aarch64_cortex-a53</code> 系列芯片（如主流的联发科 Filogic 820 / 830、MT7981、MT7986、瑞芯微 RK3568/RK3588 等）及支持 <code class="font-mono text-slate-800">apk-tools 3.x</code> 的 OpenWrt / ImmortalWrt 固件。
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 常见问题与避坑指南 (FAQ) -->
+  <section id="faq" class="py-20 bg-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-brand-600 mb-2">Frequently Asked Questions</h2>
+        <p class="text-3xl font-extrabold text-slate-900">常见问题与避坑指南</p>
+        <p class="mt-4 text-slate-600 text-sm sm:text-base">汇总用户在日常部署与配合代理使用时的常见细节问题。</p>
+      </div>
+
+      <div class="mt-12 max-w-3xl mx-auto space-y-4">
+        <!-- FAQ 1 -->
+        <div class="border border-slate-200 rounded-xl overflow-hidden">
+          <button onclick="toggleFaq(this)" class="w-full p-4 sm:p-5 text-left font-bold text-slate-900 text-sm flex items-center justify-between bg-white hover:bg-slate-50 transition-colors">
+            <span>为什么默认采用 RealIP 模式而不是 FakeIP？</span>
+            <svg class="w-4 h-4 text-slate-400 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div class="faq-content hidden px-5 pb-5 text-xs text-slate-600 leading-relaxed border-t border-slate-100 pt-3">
+            FakeIP 需要路由器本机运行有 6666 或 1053 等对应代理插件的 FakeIP 专用上游。如果在没有 FakeIP 上游的情况下贸然切入 FakeIP 模式，将导致客户端收到伪造 IP 却无法路由而出导致完全断网。因此本套件默认采用稳定通用的 RealIP。
+          </div>
+        </div>
+
+        <!-- FAQ 2 -->
+        <div class="border border-slate-200 rounded-xl overflow-hidden">
+          <button onclick="toggleFaq(this)" class="w-full p-4 sm:p-5 text-left font-bold text-slate-900 text-sm flex items-center justify-between bg-white hover:bg-slate-50 transition-colors">
+            <span>为什么默认端口选在 5335，而不是 5353？</span>
+            <svg class="w-4 h-4 text-slate-400 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div class="faq-content hidden px-5 pb-5 text-xs text-slate-600 leading-relaxed border-t border-slate-100 pt-3">
+            在绝大多数 Linux 与 OpenWrt 系统中，端口 5353 是标准 mDNS (Multicast DNS) 组播端口，常被 avahi-daemon 或类似苹果设备发现协议占用。为了避免发生端口冲突导致服务闪退，本包标准选用 5335 端口。如有特殊需求可在 LuCI 高级设置中自行修改。
+          </div>
+        </div>
+
+        <!-- FAQ 3 -->
+        <div class="border border-slate-200 rounded-xl overflow-hidden">
+          <button onclick="toggleFaq(this)" class="w-full p-4 sm:p-5 text-left font-bold text-slate-900 text-sm flex items-center justify-between bg-white hover:bg-slate-50 transition-colors">
+            <span>WebUI 9099 端口有访问权限验证吗？</span>
+            <svg class="w-4 h-4 text-slate-400 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div class="faq-content hidden px-5 pb-5 text-xs text-slate-600 leading-relaxed border-t border-slate-100 pt-3">
+            上游 AtomDNS 自带的 WebUI / API 没有强制认证。出于安全考虑，9099 端口只建议在家庭或内网环境下访问，严禁通过路由器端口转发将 9099 暴露至公网（WAN），以免被未授权访问。日常管理推荐直接使用自带鉴权的 OpenWrt LuCI 页面。
+          </div>
+        </div>
+
+        <!-- FAQ 4 -->
+        <div class="border border-slate-200 rounded-xl overflow-hidden">
+          <button onclick="toggleFaq(this)" class="w-full p-4 sm:p-5 text-left font-bold text-slate-900 text-sm flex items-center justify-between bg-white hover:bg-slate-50 transition-colors">
+            <span>后续升级 APK 会覆盖掉我修改过的配置吗？</span>
+            <svg class="w-4 h-4 text-slate-400 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div class="faq-content hidden px-5 pb-5 text-xs text-slate-600 leading-relaxed border-t border-slate-100 pt-3">
+            不会。<code class="font-mono">/etc/atomdns/</code> 目录已被注册在 apk 的保护路径（protected paths）与 conffiles 中。当升级新版本 apk 时，新默认配置会安全地落地为 <code class="font-mono">*.apk-new</code>，您原有的自定义配置将 100% 完整保留。
+          </div>
+        </div>
+
+        <!-- FAQ 5 -->
+        <div class="border border-slate-200 rounded-xl overflow-hidden">
+          <button onclick="toggleFaq(this)" class="w-full p-4 sm:p-5 text-left font-bold text-slate-900 text-sm flex items-center justify-between bg-white hover:bg-slate-50 transition-colors">
+            <span>如何彻底卸载？会残留垃圾规则吗？</span>
+            <svg class="w-4 h-4 text-slate-400 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div class="faq-content hidden px-5 pb-5 text-xs text-slate-600 leading-relaxed border-t border-slate-100 pt-3">
+            执行 <code class="font-mono bg-slate-100 px-1 py-0.5 rounded">apk del atomdns</code> 即可。包内封装了完善的 <code class="font-mono">prerm</code> 预卸载脚本，会自动执行 <code class="font-mono">atomdns-dnsctl restore</code> 清除所有 nftables 规则、恢复原 dnsmasq 配置并停止守护进程，实现零残留彻底清理。
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 底部 Footer -->
+  <footer class="bg-slate-50 border-t border-slate-200 py-12 text-slate-600 text-xs">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-6">
+      <div class="flex items-center gap-3">
+        <div class="w-7 h-7 rounded-lg bg-brand-600 flex items-center justify-center text-white font-bold">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2v3M12 19v3M2 12h3M19 12h3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"/></svg>
+        </div>
+        <div>
+          <span class="font-bold text-slate-900 text-sm">AtomDNS for OpenWrt</span>
+          <p class="text-slate-400 mt-0.5">开源、优雅且坚韧的路由器 DNS 分流解决方案</p>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-6">
+        <a href="https://github.com/LianXia233/atomdns-openwrt" target="_blank" class="hover:text-brand-600 transition-colors">GitHub 仓库</a>
+        <a href="https://github.com/jasonxtt/atomdns" target="_blank" class="hover:text-brand-600 transition-colors">上游 AtomDNS</a>
+        <a href="https://github.com/LianXia233/atomdns-openwrt/blob/master/LICENSE" target="_blank" class="hover:text-brand-600 transition-colors">GPL-3.0 许可证</a>
+        <a href="#quickstart" class="hover:text-brand-600 transition-colors">安装指南</a>
+      </div>
+    </div>
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-8 pt-6 border-t border-slate-200/60 text-center sm:text-left flex flex-col sm:flex-row justify-between text-slate-400">
+      <p>© 2026 LianXia233. 本项目遵循 GPL-3.0 开源协议开源。</p>
+      <p class="mt-2 sm:mt-0 font-mono text-[11px]">Designed for high reliability & zero downtime networking.</p>
+    </div>
+  </footer>
+
+  <!-- 浮动复制反馈 Toast -->
+  <div id="toast" class="fixed bottom-6 right-6 z-50 bg-slate-900 text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-lg border border-slate-700 opacity-0 pointer-events-none transition-all duration-300 transform translate-y-2 flex items-center gap-2">
+    <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+    <span id="toast-msg">已复制到剪贴板</span>
+  </div>
+
+  <!-- 页面交互脚本 -->
+  <script>
+    // 复制剪贴板逻辑
+    function copyToClipboard(id, btn) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const text = el.innerText || el.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        showToast('已复制到剪贴板！');
+        if (btn) {
+          const original = btn.innerHTML;
+          btn.classList.add('bg-emerald-50', 'text-emerald-700', 'border-emerald-200');
+          setTimeout(() => {
+            btn.innerHTML = original;
+            btn.classList.remove('bg-emerald-50', 'text-emerald-700', 'border-emerald-200');
+          }, 1500);
+        }
+      });
+    }
+
+    // 吐司提示
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      const toastMsg = document.getElementById('toast-msg');
+      toastMsg.textContent = msg;
+      toast.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-2');
+      toast.classList.add('opacity-100', 'translate-y-0');
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-2');
+        toast.classList.remove('opacity-100', 'translate-y-0');
+      }, 2000);
+    }
+
+    // 架构模式切换
+    function switchMode(mode) {
+      const btnRelay = document.getElementById('btn-mode-relay');
+      const btnDirect = document.getElementById('btn-mode-direct');
+      const viewRelay = document.getElementById('view-mode-relay');
+      const viewDirect = document.getElementById('view-mode-direct');
+
+      if (mode === 'relay') {
+        btnRelay.className = 'px-4 py-2 rounded-lg bg-white text-brand-700 shadow-sm transition-all';
+        btnDirect.className = 'px-4 py-2 rounded-lg text-slate-600 hover:text-slate-900 transition-all';
+        viewRelay.classList.remove('hidden');
+        viewDirect.classList.add('hidden');
+      } else {
+        btnDirect.className = 'px-4 py-2 rounded-lg bg-white text-brand-700 shadow-sm transition-all';
+        btnRelay.className = 'px-4 py-2 rounded-lg text-slate-600 hover:text-slate-900 transition-all';
+        viewDirect.classList.remove('hidden');
+        viewRelay.classList.add('hidden');
+      }
+    }
+
+    // FAQ 展开收起手风琴
+    function toggleFaq(btn) {
+      const content = btn.nextElementSibling;
+      const icon = btn.querySelector('svg');
+      const isHidden = content.classList.contains('hidden');
+      if (isHidden) {
+        content.classList.remove('hidden');
+        icon.classList.add('rotate-180');
+      } else {
+        content.classList.add('hidden');
+        icon.classList.remove('rotate-180');
+      }
+    }
+
+    // LuCI 模拟器动态交互
+    let isServiceRunning = true;
+    let isTakeover = true;
+
+    function toggleService() {
+      isServiceRunning = !isServiceRunning;
+      const btn = document.getElementById('btn-toggle-service');
+      const badge = document.getElementById('luci-status-badge');
+      const pidEl = document.getElementById('sim-pid');
+      const memEl = document.getElementById('sim-mem');
+
+      if (isServiceRunning) {
+        btn.textContent = '停止服务';
+        btn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 transition-colors';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> 运行中 · 已接管 DNS';
+        badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200';
+        pidEl.textContent = '14285';
+        memEl.textContent = '18.4 MB';
+        showToast('模拟服务已启动');
+      } else {
+        btn.textContent = '启动服务';
+        btn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition-colors';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span> 已停止 · 未接管';
+        badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200';
+        pidEl.textContent = '-';
+        memEl.textContent = '-';
+        showToast('模拟服务已停止，快照已恢复');
+      }
+    }
+
+    function toggleTakeover() {
+      isTakeover = !isTakeover;
+      const sw = document.getElementById('switch-takeover');
+      const thumb = document.getElementById('switch-takeover-thumb');
+      if (isTakeover) {
+        sw.className = 'w-11 h-6 bg-brand-600 rounded-full transition-colors relative flex items-center p-0.5';
+        thumb.className = 'w-5 h-5 bg-white rounded-full shadow-md transform translate-x-5 transition-transform';
+        showToast('DNS 接管已开启 (nat -10 生效)');
+      } else {
+        sw.className = 'w-11 h-6 bg-slate-300 rounded-full transition-colors relative flex items-center p-0.5';
+        thumb.className = 'w-5 h-5 bg-white rounded-full shadow-md transform translate-x-0 transition-transform';
+        showToast('DNS 接管已临时解除 (还原 dnsmasq)');
+      }
+    }
+
+    function setMode(mode) {
+      const rRelay = document.getElementById('radio-relay');
+      const rDirect = document.getElementById('radio-direct');
+      if (mode === 'relay') {
+        rRelay.className = 'px-3 py-1 rounded-md text-xs font-semibold bg-white text-slate-800 shadow-sm';
+        rDirect.className = 'px-3 py-1 rounded-md text-xs font-semibold text-slate-500 hover:text-slate-800';
+        showToast('已切换至 relay 模式 (保留 .lan 主机名)');
+      } else {
+        rDirect.className = 'px-3 py-1 rounded-md text-xs font-semibold bg-white text-slate-800 shadow-sm';
+        rRelay.className = 'px-3 py-1 rounded-md text-xs font-semibold text-slate-500 hover:text-slate-800';
+        showToast('已切换至 direct 直连模式 (精准审计终端 IP)');
+      }
+    }
+  </script>
+</body>
+</html>
