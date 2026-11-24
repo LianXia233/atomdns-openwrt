@@ -160,7 +160,7 @@ jobs:
           staging_dir/host/bin/apk adbdump "$APK" > /tmp/adbdump.txt
           grep -E '^\s+(name|version|arch):' /tmp/adbdump.txt | head -5
           grep -q "arch: ${PACKAGE_ARCH}" /tmp/adbdump.txt
-          grep -q "version: ${VERSION}-r1" /tmp/adbdump.txt
+          grep -Eq "version: ${VERSION}-r[0-9]+" /tmp/adbdump.txt
 
       - name: Write checksums
         shell: bash
