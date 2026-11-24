@@ -115,7 +115,19 @@ case "${1:-}" in
 		commit_file "$FLAGS" "$FLAGS.atomdns-bak" set_mode "$2" || exit 1
 		;;
 	set-socks)
-		case "${2:-}" in *[!A-Za-z0-9.:_\[\]-]*) echo "bad socks address" >&2; exit 2 ;; esac
+		# 只允许 IP:端口。填域名会让 AtomDNS 为了连代理去解析该域名，
+		# 国外组又走代理，容易形成 DNS 回环。
+		s=${2:-}
+		if [ -n "$s" ]; then
+			case "$s" in
+				\[*\]:[0-9]*) ;;
+				[0-9]*.[0-9]*.[0-9]*.[0-9]*:[0-9]*) ;;
+				*) echo "SOCKS 地址必须是 IP:端口（如 127.0.0.1:5330），不能用域名" >&2; exit 2 ;;
+			esac
+			port=${s##*:}
+			case "$port" in ''|*[!0-9]*) echo "bad socks port" >&2; exit 2 ;; esac
+			[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { echo "bad socks port" >&2; exit 2; }
+		fi
 		set_socks() { replace_block "$SETTINGS" main_proxy addr "\"$1\""; }
 		commit_file "$SETTINGS" "$SETTINGS.atomdns-bak" set_socks "$2" || exit 1
 		;;

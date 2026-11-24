@@ -35,6 +35,9 @@
 | 📜 | **内置日志** | 中文标注 + 按来源/级别细分，不跳转系统日志页 |
 | 🚀 | **代理友好** | 默认 RealIP，国外 DoH 经 HomeProxy/sing-box 的 TUN 自动代理 |
 | 🔁 | **开机守卫** | 禁用自启后重启，也会自动还原 dnsmasq，不会留下坏配置 |
+| 🛡 | **接管保活** | 每 30s 自检 nft 链与 dnsmasq 上游，被 HomeProxy/fw4 重置时自动恢复 |
+| 🧑‍💻 | **真实客户端** | 可切 `direct` 模式让审计/日志显示 LAN 真实源 IP |
+| 🧬 | **构建注入** | CI 自动更新 SRS 规则、注入腾讯 DoH/DoT 与直连白名单 |
 | 🧪 | **CI 构建** | GitHub Actions：rustup 编译 → OpenWrt SDK 打包 → 自动发布 Release |
 
 ## 🚀 快速开始
@@ -123,6 +126,55 @@ LAN 客户端 ──:53──▶ dnsmasq（本地 DHCP 名字）
 - **高级设置**：立即接管、取消接管、DNS 端口、RealIP/FakeIP、SOCKS5、保存并重启。
 
 > 保存配置时先备份、写后跑 `atomdns check` 校验，失败自动回滚；并发保存已串行化。
+
+## 🧬 构建时默认注入
+
+`build-bundle.sh` 在打包前会执行两个脚本，CI 与本地构建行为一致：
+
+- `scripts/patch-config.py`
+  - 国内组默认加入 **腾讯 DoH/DoT**（`doh.pub` / `dot.pub`，`dial_addr 119.29.29.29`），
+    `concurrent` 调整为 4；
+  - 把 `config-extra/whitelist.txt` 的直连域名追加到 `rule/whitelist.txt`
+    （白名单 → 直连 → 国内组），默认包含 8 个游戏/平台域名。
+- `scripts/update-rules.py`
+  - 读取 `srs/*.json` 里的 `url`，从 MetaCubeX meta-rules-dat / nekolsd sing-geosite
+    拉取最新 SRS 分流规则；
+  - 校验 `SRS` 魔数后原子替换，内容变化时更新 `last_updated`；
+  - 单个规则下载失败只告警，保留随包版本，不阻塞发布（`RULES_STRICT=1` 可改为失败）；
+  - 构建记录写入 `webinfo/rules-updated.json`。
+
+> 关闭在线规则更新：`UPDATE_RULES=0 VERSION=1.0.0 ./build-bundle.sh ...`
+
+## 🔁 接管保活
+
+服务启动后会运行一个 procd `watchdog` 实例，每 **30 秒**自检：
+
+- `inet atomdns` 接管链是否存在、`redirect` 目标是否与当前模式一致；
+- dnsmasq 是否仍为 `noresolv=1` 且唯一上游 `127.0.0.1#5335`。
+
+被 HomeProxy / fw4 / 手工改动重置时自动修回，并写一条 `保活：…` 日志。
+只有 `/etc/atomdns/takeover.wanted` 存在（当前处于“已接管”意图）时才动手；
+点“取消接管”后不会自己抢回来。LuCI 页面 5 秒轮询并显示保活状态。
+
+## 🧑‍💻 客户端记录
+
+AtomDNS 的客户端身份只取 socket 源地址（不会从 ECS/审计头推断）。因此接管有两种模式：
+
+| 模式 | 路径 | 客户端记录 | 本地 DHCP 名字（`.lan`） |
+| --- | --- | --- | --- |
+| `relay`（默认） | LAN :53 → dnsmasq → AtomDNS | 统一显示 `127.0.0.1` | ✅ |
+| `direct` | LAN :53 → AtomDNS :5335 | **真实客户端 IP** | ❌（需要就写 hosts） |
+
+在 LuCI 高级设置「客户端记录」里切换，立即生效；模式记在 `/etc/atomdns/takeover.mode`。
+
+**国外组与代理**：`foreign` / `foreignecs` 的条目默认 `use_proxy: true`，填写
+`main_proxy` 后优先经 SOCKS 代理解析；为空时直连（仍由 sing-box TUN 分流）。
+为防止 DNS 回环：
+
+- SOCKS 地址只接受 `IP:端口`（如 HomeProxy 的 `127.0.0.1:5330`），**不接受域名**；
+- AtomDNS 自己的上游 DoH 都带 `dial_addr`，连接代理不需要再解析域名；
+- 代理（HomeProxy/sing-box）的内部 DNS 不要指到 AtomDNS `5335`，
+  保持它自己的 bootstrap/DoH 上游。
 
 ## 🛠 构建
 

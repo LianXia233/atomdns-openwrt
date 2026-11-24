@@ -1,0 +1,8 @@
+domain:hottagames.com
+domain:iwplay.com.tw
+domain:laohu.com
+domain:perfectworld.com
+domain:perfectworldgames.com
+domain:pwsdk.com
+domain:wanmei.com
+domain:wmupd.com

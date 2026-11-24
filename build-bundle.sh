@@ -55,6 +55,28 @@ awk '
 mv "$TMP/$NAME/config/sub_config/flags.yaml.tmp" "$TMP/$NAME/config/sub_config/flags.yaml"
 grep -n 'default: realip' "$TMP/$NAME/config/sub_config/flags.yaml" | head -1
 
+# CI 与本地构建统一注入默认项，然后从 srs 描述文件的 url 拉取最新分流规则。
+PY=${PYTHON:-}
+if [ -z "$PY" ]; then
+	for candidate in python3 python; do
+		if command -v "$candidate" >/dev/null 2>&1; then PY=$candidate; break; fi
+	done
+fi
+[ -n "$PY" ] || { echo "错误: 需要 python3（或设置 PYTHON=/path/to/python）" >&2; exit 1; }
+# Git Bash 下 Windows Python 需要 Windows 路径；Linux/CI 没有 cygpath，保持原样。
+winpath() {
+	if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
+"$PY" "$(winpath "$HERE/scripts/patch-config.py")" "$(winpath "$TMP/$NAME/config")"
+if [ "${UPDATE_RULES:-1}" = "1" ]; then
+	"$PY" "$(winpath "$HERE/scripts/update-rules.py")" "$(winpath "$TMP/$NAME/config")" || {
+		echo "警告: 分流规则在线更新失败，继续使用随包规则" >&2
+	}
+else
+	echo "跳过分流规则在线更新（UPDATE_RULES=0）"
+fi
+
 # 发布版本号写进 WebUI 清单，避免发布 v1.0.0 时界面仍显示上游 0.6.6。
 MANIFEST="$TMP/$NAME/config/ui/main/ui-manifest.json"
 if [ -f "$MANIFEST" ]; then

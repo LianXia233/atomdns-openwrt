@@ -13,17 +13,28 @@ set -u
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-# 串行化：升级/重启时可能同时有 apply 与 restore，两个进程同时改 nft 和
-# dnsmasq 会出现「刚建的表被另一个删掉」的竞态。
-if command -v flock >/dev/null 2>&1; then
+# 串行化短命令；watch 是常驻进程，不能持锁。
+if [ "${1:-}" != "watch" ] && command -v flock >/dev/null 2>&1; then
 	exec 9>/tmp/atomdns-dnsctl.lock
 	flock 9
 fi
 
 CONF=/etc/atomdns/config_custom.yaml
 STATE=/etc/atomdns/dns-takeover.state
+WANT=/etc/atomdns/takeover.wanted
+MODE=/etc/atomdns/takeover.mode
 TABLE=atomdns
 PRIO="dstnat - 10"
+
+# relay：LAN :53 -> dnsmasq -> AtomDNS（本地 DHCP 名字可用，审计客户端是 127.0.0.1）
+# direct：LAN :53 -> AtomDNS 5335（审计显示真实客户端；.lan 等本地名字需自行加 hosts）
+mode() {
+	m=$(cat "$MODE" 2>/dev/null)
+	case "$m" in
+		direct|relay) echo "$m" ;;
+		*) echo relay ;;
+	esac
+}
 
 lan_if() {
 	if [ -n "${ATOMDNS_LAN_IF:-}" ]; then
@@ -96,8 +107,8 @@ apply_nft() {
 		nft add table inet "$TABLE" 2>/dev/null
 		nft add chain inet "$TABLE" prerouting "{ type nat hook prerouting priority $PRIO; policy accept; }" || return 1
 	fi
-	nft add rule inet "$TABLE" prerouting iifname "$1" udp dport 53 counter redirect to :53 comment atomdns-lan-dns || return 1
-	nft add rule inet "$TABLE" prerouting iifname "$1" tcp dport 53 counter redirect to :53 comment atomdns-lan-dns || return 1
+	nft add rule inet "$TABLE" prerouting iifname "$1" udp dport 53 counter redirect to ":$2" comment atomdns-lan-dns || return 1
+	nft add rule inet "$TABLE" prerouting iifname "$1" tcp dport 53 counter redirect to ":$2" comment atomdns-lan-dns || return 1
 }
 
 apply() {
@@ -111,27 +122,102 @@ apply() {
 	p=$(port)
 	[ -n "$p" ] || { echo "配置里找不到 listen 端口" >&2; return 1; }
 	wait_listen "$p" || { echo "AtomDNS 端口 $p 未监听，忽略接管" >&2; return 1; }
-	apply_nft "$(lan_if)" || { echo "nft 规则创建失败" >&2; return 1; }
+	m=$(mode)
+	target=53
+	[ "$m" = direct ] && target=$p
+	apply_nft "$(lan_if)" "$target" || { echo "nft 规则创建失败" >&2; return 1; }
 	apply_dnsmasq "$p"
-	echo "已接管 DNS：LAN($(lan_if)) :53 -> dnsmasq -> 127.0.0.1:$p"
+	: > "$WANT"
+	if [ "$m" = direct ]; then
+		echo "已接管 DNS（直连模式）：LAN($(lan_if)) :53 -> AtomDNS 127.0.0.1:$p"
+	else
+		echo "已接管 DNS（中继模式）：LAN($(lan_if)) :53 -> dnsmasq -> 127.0.0.1:$p"
+	fi
 }
 
 restore() {
+	rm -f "$WANT"
 	nft delete table inet "$TABLE" 2>/dev/null
 	restore_dnsmasq
 	echo "已恢复原 DNS 配置"
+}
+
+# 周期性自检：nft 接管链或 dnsmasq 上游被 HomeProxy/fw4/手工改掉时自动修回。
+repair() {
+	[ -f "$WANT" ] || return 0
+	pidof atomdns >/dev/null 2>&1 || return 0
+	p=$(port)
+	[ -n "$p" ] || p=5335
+	wait_listen "$p" || return 1
+
+	need_nft=0
+	m=$(mode)
+	target=53
+	[ "$m" = direct ] && target=$p
+	nft list table inet "$TABLE" 2>/dev/null | grep -q "redirect to :$target" || need_nft=1
+
+	need_dns=0
+	nr=$(uci -q get dhcp.@dnsmasq[0].noresolv)
+	[ "$nr" = "1" ] || need_dns=1
+	srv=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr '\n' ' ')
+	case " $srv " in
+		*" 127.0.0.1#$p "*) ;;
+		*) need_dns=1 ;;
+	esac
+
+	if [ "$need_nft" = 1 ]; then
+		if apply_nft "$(lan_if)" "$target"; then
+			echo "保活：nft 接管链已恢复（redirect :$target）"
+		else
+			echo "保活：nft 接管链恢复失败" >&2
+		fi
+	fi
+	if [ "$need_dns" = 1 ]; then
+		apply_dnsmasq "$p"
+		echo "保活：dnsmasq 上游已恢复为 127.0.0.1#$p"
+	fi
+}
+
+watch() {
+	interval=${1:-30}
+	case "$interval" in ''|*[!0-9]*) interval=30 ;; esac
+	echo "保活已启动（每 ${interval}s 自检）"
+	while :; do
+		/usr/bin/atomdns-dnsctl repair || true
+		sleep "$interval"
+	done
 }
 
 status() {
 	r=0; pidof atomdns >/dev/null 2>&1 && r=1
 	t=0; nft list table inet "$TABLE" >/dev/null 2>&1 && t=1
 	s=false; [ -f "$STATE" ] && s=true
-	printf '{"running":%s,"takeover":%s,"port":"%s","state":%s}\n' "$r" "$t" "$(port)" "$s"
+	w=0
+	[ -f "$WANT" ] && pgrep -f "atomdns-dnsctl watch" >/dev/null 2>&1 && w=1
+	printf '{"running":%s,"takeover":%s,"watchdog":%s,"mode":"%s","port":"%s","state":%s}\n' \
+		"$r" "$t" "$w" "$(mode)" "$(port)" "$s"
+}
+
+set_mode() {
+	m=${2:-}
+	case "$m" in
+		relay|direct) ;;
+		*) echo "mode 必须是 relay 或 direct" >&2; return 2 ;;
+	esac
+	echo "$m" > "$MODE"
+	if [ -f "$WANT" ] && pidof atomdns >/dev/null 2>&1; then
+		apply
+	else
+		echo "客户端记录模式已设为 $m（下次接管时生效）"
+	fi
 }
 
 case "${1:-}" in
 	apply) apply ;;
 	restore) restore ;;
+	repair) repair ;;
+	watch) watch "${2:-30}" ;;
+	set-mode) set_mode "$@" ;;
 	status) status ;;
 	recover)
 		# Boot guard: only when atomdns will not start by itself.
@@ -139,7 +225,7 @@ case "${1:-}" in
 		restore_dnsmasq
 		;;
 	*)
-		echo "usage: $0 status|apply|restore|recover" >&2
+		echo "usage: $0 status|apply|restore|repair|watch [SECONDS]|set-mode relay|direct|recover" >&2
 		exit 2
 		;;
 esac

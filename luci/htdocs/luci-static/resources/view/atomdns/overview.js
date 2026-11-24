@@ -139,11 +139,16 @@ function loadStatus() {
 			rss: null,
 			threads: null,
 			takeover: false,
+			watchdog: false,
+			mode: 'relay',
 			cfgctl: {}
 		};
 
 		try {
-			status.takeover = !!JSON.parse(results[7].stdout || '{}').takeover;
+			var dnsctl = JSON.parse(results[7].stdout || '{}') || {};
+			status.takeover = !!dnsctl.takeover;
+			status.watchdog = !!dnsctl.watchdog;
+			status.mode = dnsctl.mode === 'direct' ? 'direct' : 'relay';
 		}
 		catch (e) {}
 
@@ -458,7 +463,15 @@ return view.extend({
 					badge(status.takeover ? '已接管' : '未接管', status.takeover),
 					E('span', {}, status.takeover
 						? '　LAN :53 → dnsmasq → AtomDNS'
-						: '　LAN 仍走原 DNS（HomeProxy/上游）')
+						: '　LAN 仍走原 DNS（HomeProxy/上游）'),
+					status.takeover
+						? E('span', {}, '　保活：' + (status.watchdog ? '运行中（30s 自检）' : '未运行'))
+						: '',
+					status.takeover
+						? E('span', {}, '　记录：' + (status.mode === 'direct'
+							? '直连（真实客户端）'
+							: '中继 dnsmasq（127.0.0.1）'))
+						: ''
 				]),
 				kv('运行时长', fmtUptime(status.uptime)),
 				kv('内存占用', fmtKB(status.rss) +
@@ -522,7 +535,7 @@ return view.extend({
 			var parsed = parseLogs(status.logRaw);
 			var logs = E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '日志'),
-				E('p', {}, '每 10 秒刷新。按来源/级别细分；级别与来源为中文标注，日志正文保持原文。'),
+				E('p', {}, '每 5 秒刷新。按来源/级别细分；级别与来源为中文标注，日志正文保持原文。'),
 				logBlock('service', '接管与服务', parsed.service),
 				logBlock('error', '应用错误', parsed.error),
 				logBlock('warn', '应用警告', parsed.warn),
@@ -544,6 +557,45 @@ return view.extend({
 					'class': 'cbi-input-text',
 					'value': String(status.cfgctl.port || '')
 				})),
+				field('客户端记录', [
+					E('select', {
+						'id': 'atomdns-adv-client',
+						'class': 'cbi-input-select'
+					}, [
+						E('option', {
+							'value': 'relay',
+							'selected': status.mode === 'relay' ? 'selected' : null
+						}, '中继 dnsmasq（本地名字可用，客户端显示 127.0.0.1）'),
+						E('option', {
+							'value': 'direct',
+							'selected': status.mode === 'direct' ? 'selected' : null
+						}, '直连 AtomDNS（真实客户端，.lan 需 hosts）')
+					]),
+					' ',
+					E('button', {
+						'class': 'btn cbi-button cbi-button-apply',
+						'click': ui.createHandlerFn(context, function() {
+							var value = (document.getElementById('atomdns-adv-client') || {}).value;
+
+							return sh(DNSCTL, [ 'set-mode', value ]).then(function(result) {
+								if (result.code !== 0)
+									throw new Error((result.stderr || result.stdout || '切换失败').trim());
+
+								ui.addTimeLimitedNotification(null, E('p', {},
+									value === 'direct' ? '已切换为直连模式（真实客户端）'
+										: '已切换为中继模式（dnsmasq）'), 3000, 'info');
+
+								return refresh();
+							}).catch(function(err) {
+								ui.addNotification(null, E('p', {}, '切换失败：' + err.message), 'error');
+							});
+						})
+					}, '应用'),
+					E('p', { 'style': 'margin-top:6px;color:#666' },
+						'直连：LAN 的 53 直接交给 AtomDNS，审计/查询日志显示真实客户端 IP，' +
+						'但 dnsmasq 的本地 DHCP 名字（.lan）不再参与解析，需要就加到 hosts。' +
+						'中继：保留本地名字，客户端统一显示为 127.0.0.1。')
+				]),
 				field('运行模式', E('select', {
 					'id': 'atomdns-adv-mode',
 					'class': 'cbi-input-select'
@@ -557,13 +609,18 @@ return view.extend({
 						'selected': status.cfgctl.mode === 'fakeip' ? 'selected' : null
 					}, 'FakeIP 分流（需要本机 FakeIP 上游）')
 				])),
-				field('SOCKS5 代理（可选）', E('input', {
-					'type': 'text',
-					'id': 'atomdns-adv-socks',
-					'class': 'cbi-input-text',
-					'placeholder': '127.0.0.1:5330',
-					'value': String(status.cfgctl.socks || '')
-				})),
+				field('SOCKS5 代理（可选）', [
+					E('input', {
+						'type': 'text',
+						'id': 'atomdns-adv-socks',
+						'class': 'cbi-input-text',
+						'placeholder': '127.0.0.1:5330',
+						'value': String(status.cfgctl.socks || '')
+					}),
+					E('p', { 'style': 'margin-top:6px;color:#666' },
+						'只填 IP:端口（如 HomeProxy 的 127.0.0.1:5330）。不要填域名：' +
+						'AtomDNS 为连代理去解析该域名会形成 DNS 回环。')
+				]),
 				E('div', { 'class': 'cbi-value' }, [
 					E('label', { 'class': 'cbi-value-title' }, ''),
 					E('div', { 'class': 'cbi-value-field' }, [
@@ -612,7 +669,7 @@ return view.extend({
 				return Promise.resolve();
 
 			return loadStatus().then(draw);
-		}, 10);
+		}, 5);
 
 		return container;
 	},
